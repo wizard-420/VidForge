@@ -1,0 +1,25 @@
+services:
+  yt-studio:
+    build: .
+    container_name: yt-automation-studio
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist workspace, exports, logs, and database across restarts
+      - ./workspace:/app/workspace
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+      - yt-storage:/app/storage
+      # Mount YouTube OAuth credentials (if available)
+      - ./client_secret.json:/app/client_secret.json:ro
+      - ./token.json:/app/token.json
+    environment:
+      - WORKSPACE_DIR=/app/workspace
+      - EXPORT_DIR=/app/exports
+      - SERVER_PORT=8000
+    restart: unless-stopped
+
+volumes:
+  yt-storage:

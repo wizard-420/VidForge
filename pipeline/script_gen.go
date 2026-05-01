@@ -1,0 +1,300 @@
+package pipeline
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"yt-automation-studio/config"
+	"yt-automation-studio/models"
+)
+
+// RunScriptGenerator executes Stage 2: generate a full ScriptDocument using Groq AI
+func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
+	payload := job.Payload
+
+	progress(models.ProgressEvent{
+		JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+		ProgressPct: 10, Message: "Crafting script prompt...",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Calculate target word count
+	wordCount := payload.DurationMin * 130 // 130 wpm average TTS pace
+	if payload.Format == "short" {
+		wordCount = 120 // fixed for shorts
+	}
+
+	var script *models.ScriptDocument
+	var err error
+
+	// Generate long-form script
+	if payload.Format == "long" || payload.Format == "both" {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+			ProgressPct: 30, Message: "Generating long-form script with Groq AI...",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+
+		script, err = generateLongScript(payload.RawInput, payload.DurationMin, wordCount, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+		if err != nil {
+			return fmt.Errorf("long script generation: %w", err)
+		}
+		script.JobID = job.JobID
+		script.Format = "long"
+	}
+
+	// Generate short-form script
+	if payload.Format == "short" {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+			ProgressPct: 30, Message: "Generating YouTube Shorts script...",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+
+		script, err = generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+		if err != nil {
+			return fmt.Errorf("short script generation: %w", err)
+		}
+		script.JobID = job.JobID
+		script.Format = "short"
+	}
+
+	// Generate "both" — long + short summary
+	if payload.Format == "both" && script != nil {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+			ProgressPct: 70, Message: "Generating Shorts version...",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+
+		shortScript, err := generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+		if err != nil {
+			// Non-fatal: log and continue with long only
+			job.AddError(fmt.Sprintf("Short script generation failed: %v", err))
+		} else {
+			script.ShortVersion = &models.ShortScript{
+				Hook:          shortScript.Hook,
+				Segments:      shortScript.Segments,
+				TotalDuration: shortScript.TotalDuration,
+			}
+		}
+	}
+
+	if script == nil {
+		return fmt.Errorf("no script generated")
+	}
+
+	// Compute totals
+	script.TotalSegments = len(script.Segments)
+	totalDur := 0
+	for _, seg := range script.Segments {
+		totalDur += seg.DurationSec
+	}
+	script.TotalDuration = totalDur
+
+	// Store in job context
+	job.Script = script
+
+	// Save script to workspace
+	jobDir := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", job.JobID))
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return fmt.Errorf("create job directory: %w", err)
+	}
+
+	scriptJSON, _ := json.MarshalIndent(script, "", "  ")
+	if err := os.WriteFile(filepath.Join(jobDir, "script.json"), scriptJSON, 0644); err != nil {
+		return fmt.Errorf("save script: %w", err)
+	}
+
+	progress(models.ProgressEvent{
+		JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+		ProgressPct: 100, Message: fmt.Sprintf("Script generated: %d segments, ~%d min", script.TotalSegments, script.TotalDuration/60),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	})
+
+	return nil
+}
+
+func generateLongScript(topic string, durationMin, wordCount int, tone, language string, clipCount, imageCount int) (*models.ScriptDocument, error) {
+	totalVisuals := clipCount + imageCount
+	systemPrompt := fmt.Sprintf(`You are an expert YouTube scriptwriter for faceless channels. You write scripts that:
+- Open with a 5-second hook that creates immediate curiosity
+- Use short, punchy sentences optimised for text-to-speech voiceover
+- Maintain a %s tone throughout
+- Include dramatic pauses (marked as [PAUSE])
+- End with a strong CTA (like, subscribe, comment)
+- For each segment, provide fine-grained sub_visuals: multiple visual changes within each segment to keep the audience engaged
+
+IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone)
+
+	userPrompt := fmt.Sprintf(`Write a complete YouTube script for this topic: "%s"
+Target duration: %d minutes (~%d words at 130 words/minute)
+Tone: %s
+Language: %s
+
+Return ONLY valid JSON matching this exact schema:
+{
+  "title_options": ["Title A", "Title B", "Title C"],
+  "description": "Full YouTube description with timestamps and links",
+  "tags": ["tag1", "tag2", ...up to 15 tags],
+  "thumbnail_text": "Short punchy text for thumbnail",
+  "hook": "Opening 5-second line to grab attention",
+  "segments": [
+    {
+      "segment_id": 1,
+      "type": "hook",
+      "text": "Full narration text for this segment",
+      "word_count": 120,
+      "duration_sec": 45,
+      "visual_cue": "Primary visual description",
+      "visual_query": "primary search query",
+      "music_mood": "dramatic",
+      "transition": "fade",
+      "sub_visuals": [
+        {"index": 0, "query": "ancient rome colosseum aerial", "description": "Aerial view of the Roman Colosseum", "type": "clip"},
+        {"index": 1, "query": "roman soldiers marching", "description": "Roman soldiers in formation", "type": "clip"},
+        {"index": 2, "query": "ancient rome painting dramatic", "description": "Dramatic painting of ancient Rome", "type": "image"}
+      ]
+    }
+  ]
+}
+
+CRITICAL VISUAL RULES:
+- Generate exactly %d total sub_visuals across ALL segments (%d clips + %d images).
+- Distribute them proportionally across segments based on each segment's duration.
+- Each sub_visual query MUST be 2-4 words optimized for Pexels stock video search.
+- Each sub_visual MUST semantically match the SPECIFIC words being narrated at that point in the segment text.
+  Example: If the text mentions "nine planets", you need visuals for each planet being discussed.
+  If the text mentions "Mars has a red surface", the sub_visual at that point must be "mars red surface planet".
+- Set type to "clip" for stock footage, "image" for AI-generated images.
+- NEVER repeat the same query across sub_visuals. Each must be unique.
+- ALWAYS include the main subject in every query (e.g., "mars red surface" not just "red surface").
+
+Generate at least %d segments to fill %d minutes. Each segment should be 30-90 seconds.
+The first segment type must be "hook", the last must be "cta", and all others "body".`,
+		topic, durationMin, wordCount, tone, language,
+		totalVisuals, clipCount, imageCount,
+		max(durationMin/2, 4), durationMin)
+
+	return callGroqForScript(systemPrompt, userPrompt)
+}
+
+func generateShortScript(topic, tone, language string, clipCount, imageCount int) (*models.ScriptDocument, error) {
+	totalVisuals := clipCount + imageCount
+	systemPrompt := fmt.Sprintf(`You are an expert YouTube Shorts scriptwriter for faceless channels. You write viral short-form scripts that:
+- Hook must be in the FIRST 3 words (no slow intros)
+- Maximum 130 words total
+- One single revelation or fact that makes the viewer share it
+- End with a direct question to drive comments
+- Maintain a %s tone
+- Provide fine-grained sub_visuals for fast-paced visual changes
+
+IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone)
+
+	userPrompt := fmt.Sprintf(`Write a 45-60 second YouTube Shorts script for: "%s"
+Tone: %s
+Language: %s
+
+Rules:
+- Hook must be in the FIRST 3 words (no slow intros)
+- Maximum 130 words total
+- One single revelation or fact that makes the viewer share it
+- End with a direct question to drive comments
+
+Return ONLY valid JSON matching this schema:
+{
+  "title_options": ["Title A", "Title B", "Title C"],
+  "description": "Short YouTube description",
+  "tags": ["tag1", "tag2", ...up to 15 tags],
+  "thumbnail_text": "Short punchy text",
+  "hook": "Opening line",
+  "segments": [
+    {
+      "segment_id": 1,
+      "type": "hook",
+      "text": "...",
+      "word_count": 30,
+      "duration_sec": 12,
+      "visual_cue": "...",
+      "visual_query": "...",
+      "music_mood": "dramatic",
+      "transition": "cut",
+      "sub_visuals": [
+        {"index": 0, "query": "space nebula galaxy colorful", "description": "Colorful space nebula", "type": "clip"},
+        {"index": 1, "query": "earth rotating planet blue", "description": "Earth rotating in space", "type": "clip"}
+      ]
+    }
+  ]
+}
+
+CRITICAL VISUAL RULES:
+- Generate exactly %d total sub_visuals across ALL segments (%d clips + %d images).
+- Distribute them proportionally across segments based on each segment's duration.
+- Each sub_visual query MUST be 2-4 words optimized for Pexels stock video search.
+- Each sub_visual MUST semantically match the SPECIFIC words being narrated at that point.
+- Set type to "clip" for stock footage, "image" for AI-generated images.
+- NEVER repeat the same query. Each must be unique.
+- ALWAYS include the main subject in every query.
+
+Generate 4-6 fast-paced segments. Each segment should be 8-15 seconds. Total duration 45-60 seconds.`, topic, tone, language,
+		totalVisuals, clipCount, imageCount)
+
+	return callGroqForScript(systemPrompt, userPrompt)
+}
+
+func callGroqForScript(systemPrompt, userPrompt string) (*models.ScriptDocument, error) {
+	// Retry up to 3 times with back-off
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, err := callGroq(systemPrompt, userPrompt)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt*5) * time.Second)
+			continue
+		}
+
+		// Extract JSON from response
+		jsonStr := extractJSON(resp)
+
+		// Try to parse as ScriptDocument
+		var script models.ScriptDocument
+		if err := json.Unmarshal([]byte(jsonStr), &script); err != nil {
+			lastErr = fmt.Errorf("invalid JSON from Groq (attempt %d): %w\nRaw: %s", attempt, err, truncate(resp, 200))
+			time.Sleep(time.Duration(attempt*5) * time.Second)
+			continue
+		}
+
+		// Validate minimum requirements
+		if len(script.Segments) == 0 {
+			lastErr = fmt.Errorf("script has no segments (attempt %d)", attempt)
+			continue
+		}
+		if len(script.TitleOptions) == 0 {
+			lastErr = fmt.Errorf("script has no title options (attempt %d)", attempt)
+			continue
+		}
+
+		return &script, nil
+	}
+
+	return nil, fmt.Errorf("script generation failed after 3 attempts: %w", lastErr)
+}
+
+func truncate(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

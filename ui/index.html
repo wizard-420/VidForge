@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Automation Studio — AI Video Pipeline</title>
+  <meta name="description" content="AI-powered faceless YouTube video creation pipeline">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="icon">🎬</div>
+      <h1>YT Studio<span>Automation Engine</span></h1>
+    </div>
+    <nav>
+      <div class="nav-item active" data-page="create" onclick="showPage('create')">🎯 Create Video</div>
+      <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">📋 Jobs</div>
+      <div class="nav-item" data-page="settings" onclick="showPage('settings')">⚙️ Settings</div>
+    </nav>
+    <div style="margin-top:auto;padding:12px;border-top:1px solid var(--glass-border)">
+      <div class="cost-badge">💰 Est. ₹2,105/mo</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px">v1.0.0 · Local Mode</div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main">
+    <!-- CREATE PAGE -->
+    <div id="page-create">
+      <div class="page-header">
+        <h2>Create New Video</h2>
+        <p>Configure your video pipeline and hit generate</p>
+      </div>
+
+      <!-- Input Type -->
+      <div class="card">
+        <div class="card-title">📝 Content Input</div>
+        <div class="tabs" id="input-tabs">
+          <button class="tab active" onclick="setInputType('category')">Category</button>
+          <button class="tab" onclick="setInputType('topic')">Specific Topic</button>
+          <button class="tab" onclick="setInputType('event')">Event / Story</button>
+        </div>
+        <textarea id="raw-input" placeholder="e.g. Dark History, Ancient Civilizations, Tech Scandals..." oninput="state.raw_input=this.value"></textarea>
+        <div class="hints" id="hint-chips"></div>
+      </div>
+
+      <!-- Format -->
+      <div class="card">
+        <div class="card-title">📐 Format</div>
+        <div class="format-grid">
+          <div class="format-card active" onclick="setFormat('long')">
+            <div class="icon">📺</div>
+            <div class="label">Long-form</div>
+            <div class="desc">8–20 min video</div>
+          </div>
+          <div class="format-card" onclick="setFormat('short')">
+            <div class="icon">📱</div>
+            <div class="label">Shorts</div>
+            <div class="desc">45–60 sec</div>
+          </div>
+          <div class="format-card" onclick="setFormat('both')">
+            <div class="icon">🎯</div>
+            <div class="label">Both</div>
+            <div class="desc">Long + Short</div>
+          </div>
+        </div>
+        <div class="slider-group" id="duration-slider">
+          <label>Duration <span id="dur-val">8 min</span></label>
+          <input type="range" min="5" max="20" value="8" oninput="state.duration_min=+this.value;document.getElementById('dur-val').textContent=this.value+' min'">
+        </div>
+      </div>
+
+      <!-- Voice & Video -->
+      <div class="card">
+        <div class="card-title">🎙️ Voiceover</div>
+        <div class="toggle-group">
+          <button class="toggle-btn active" onclick="setVoiceMode('ai')">AI Voice</button>
+          <button class="toggle-btn" onclick="setVoiceMode('manual')">Manual Record</button>
+        </div>
+        <div class="voice-grid" id="voice-grid">
+          <div class="voice-card active" onclick="setVoice('adam')"><div class="name">🎤 Adam</div><div class="info">Deep, authoritative</div></div>
+          <div class="voice-card" onclick="setVoice('rachel')"><div class="name">🎤 Rachel</div><div class="info">Warm, professional</div></div>
+          <div class="voice-card" onclick="setVoice('domi')"><div class="name">🎤 Domi</div><div class="info">Strong, confident</div></div>
+          <div class="voice-card" onclick="setVoice('josh')"><div class="name">🎤 Josh</div><div class="info">Young, energetic</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🎬 Video Generation</div>
+        <div class="toggle-group">
+          <button class="toggle-btn active" onclick="setVideoMode('auto')">Auto Generate</button>
+          <button class="toggle-btn" onclick="setVideoMode('manual')">Manual Clips</button>
+        </div>
+        <div class="hints" style="margin-top:10px" id="style-chips">
+          <span class="hint active" onclick="setVideoStyle('stock')">📹 Stock Footage</span>
+          <span class="hint" onclick="setVideoStyle('ai_images')">🎨 AI Images</span>
+          <span class="hint" onclick="setVideoStyle('mixed')">🔀 Mixed</span>
+        </div>
+        <div id="media-counts" style="margin-top:16px">
+          <div class="form-row">
+            <div class="slider-group" id="clip-count-group">
+              <label>Stock Video Clips <span id="clip-val">6</span></label>
+              <input type="range" min="0" max="20" value="6" oninput="state.clip_count=+this.value;document.getElementById('clip-val').textContent=this.value">
+            </div>
+            <div class="slider-group" id="image-count-group" style="display:none">
+              <label>AI Images <span id="img-val">0</span></label>
+              <input type="range" min="0" max="15" value="0" oninput="state.image_count=+this.value;document.getElementById('img-val').textContent=this.value">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Total visuals are distributed evenly across the video and aligned to the script.</div>
+        </div>
+      </div>
+
+      <!-- Music & Tone -->
+      <div class="card">
+        <div class="card-title">🎵 Music & Tone</div>
+        <div class="form-row">
+          <div>
+            <div class="toggle-group" style="margin-bottom:12px">
+              <button class="toggle-btn active" onclick="setMusicMode('auto')">Auto Music</button>
+              <button class="toggle-btn" onclick="setMusicMode('skip')">No Music</button>
+            </div>
+          </div>
+          <div></div>
+        </div>
+        <label style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:8px;display:block">Script Tone</label>
+        <div class="tone-chips">
+          <button class="tone-chip active" onclick="setTone('dramatic')">🎭 Dramatic</button>
+          <button class="tone-chip" onclick="setTone('educational')">📚 Educational</button>
+          <button class="tone-chip" onclick="setTone('conversational')">💬 Conversational</button>
+          <button class="tone-chip" onclick="setTone('suspenseful')">😰 Suspenseful</button>
+          <button class="tone-chip" onclick="setTone('motivational')">💪 Motivational</button>
+          <button class="tone-chip" onclick="setTone('humorous')">😄 Humorous</button>
+        </div>
+      </div>
+
+      <!-- Advanced -->
+      <div class="card">
+        <div class="card-title">⚙️ Advanced Options</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Language</label>
+            <select onchange="state.language=this.value">
+              <option value="english">English</option>
+              <option value="hindi">Hindi</option>
+              <option value="hinglish">Hinglish</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Upload Schedule</label>
+            <select onchange="state.upload_schedule=this.value">
+              <option value="immediate">Immediately</option>
+              <option value="19:00">7:00 PM</option>
+              <option value="20:00">8:00 PM</option>
+              <option value="21:00">9:00 PM</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Caption Style</label>
+            <select onchange="state.caption_style=this.value">
+              <option value="bold_white">Bold White (Recommended)</option>
+              <option value="subtitle">Standard Subtitle</option>
+              <option value="none">No Captions</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="display:flex;align-items:center;gap:8px;margin-top:28px;cursor:pointer;">
+              <input type="checkbox" id="auto-upload-chk" onchange="state.auto_upload=this.checked">
+              Auto-Upload to YouTube
+            </label>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">If unchecked, you can review the video before uploading.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Generate -->
+      <button class="btn-generate" id="btn-generate" onclick="createJob()">🚀 Generate Video</button>
+
+      <!-- Progress Panel -->
+      <div class="progress-panel" id="progress-panel">
+        <div class="card" style="border-color:var(--accent);margin-top:20px">
+          <div class="card-title">⚡ Pipeline Progress</div>
+          <div id="progress-job-id" style="font-size:11px;color:var(--text-muted);margin-bottom:16px"></div>
+          <ul class="pipeline-tracker" id="pipeline-tracker">
+            <li class="pipeline-step waiting" data-stage="1"><div class="step-icon">1</div><div class="step-info"><div class="step-name">Input Parsing</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="2"><div class="step-icon">2</div><div class="step-info"><div class="step-name">Script Generation</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="3"><div class="step-icon">3</div><div class="step-info"><div class="step-name">Voiceover</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="4"><div class="step-icon">4</div><div class="step-info"><div class="step-name">Visual Fetch</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="5"><div class="step-icon">5</div><div class="step-info"><div class="step-name">Music</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="6"><div class="step-icon">6</div><div class="step-info"><div class="step-name">Video Render</div><div class="step-msg">Waiting...</div></div></li>
+            <li class="pipeline-step waiting" data-stage="7"><div class="step-icon">7</div><div class="step-info"><div class="step-name">Upload</div><div class="step-msg">Waiting...</div></div></li>
+          </ul>
+          
+          <div id="approval-panel" style="display:none; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--glass-border);">
+            <div style="font-weight:600;margin-bottom:12px;color:var(--accent)">👀 Video Ready for Review</div>
+            <video id="preview-video" controls style="max-width: 100%; max-height: 400px; display: block; margin: 0 auto 16px auto; border-radius: 8px; background: #000;"></video>
+            <div style="display:flex; gap:12px">
+              <button class="btn-generate" style="flex:1" onclick="approveJob()">✅ Approve & Upload</button>
+              <button class="toggle-btn" style="flex:1" onclick="rejectJob()">❌ Reject (Discard)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- JOBS PAGE -->
+    <div id="page-jobs" class="hidden">
+      <div class="page-header"><h2>Job History</h2><p>Track all your video generation jobs</p></div>
+      <div class="card">
+        <table class="jobs-table">
+          <thead><tr><th>ID</th><th>Input</th><th>Format</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="jobs-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:32px">No jobs yet — create your first video!</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SETTINGS PAGE -->
+    <div id="page-settings" class="hidden">
+      <div class="page-header"><h2>Settings</h2><p>API keys and configuration</p></div>
+      <div class="card">
+        <div class="card-title">🔑 API Key Status</div>
+        <div id="key-status-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🛠️ System Status</div>
+        <div id="system-status"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

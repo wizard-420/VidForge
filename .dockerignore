@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+.vscode
+.idea
+workspace/
+exports/
+logs/
+storage/jobs.db
+*.exe
+client_secret.json
+token.json
+Thumbs.db
+.DS_Store

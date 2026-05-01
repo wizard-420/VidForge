@@ -1,0 +1,24 @@
+# Environment and secrets
+.env
+client_secret.json
+token.json
+
+# Build
+yt-automation-studio
+yt-automation-studio.exe
+
+# Workspace and exports
+workspace/
+exports/
+logs/
+
+# Database
+storage/jobs.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
