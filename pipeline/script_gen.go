@@ -31,55 +31,53 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 	var script *models.ScriptDocument
 	var err error
 
-	// Generate long-form script
-	if payload.Format == "long" || payload.Format == "both" {
-		progress(models.ProgressEvent{
-			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
-			ProgressPct: 30, Message: "Generating long-form script with Groq AI...",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		})
-
-		script, err = generateLongScript(payload.RawInput, payload.DurationMin, wordCount, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
-		if err != nil {
-			return fmt.Errorf("long script generation: %w", err)
-		}
+	if payload.PreGeneratedScript != nil {
+		// Manual voiceover mode: use the pre-generated script from the preview step
+		script = payload.PreGeneratedScript
 		script.JobID = job.JobID
-		script.Format = "long"
-	}
-
-	// Generate short-form script
-	if payload.Format == "short" {
 		progress(models.ProgressEvent{
 			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
-			ProgressPct: 30, Message: "Generating YouTube Shorts script...",
+			ProgressPct: 90, Message: "Using pre-generated script from manual recording...",
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		})
+	} else {
+		// Generate long-form script
+		if payload.Format == "long" || payload.Format == "both" {
+			progress(models.ProgressEvent{
+				JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+				ProgressPct: 30, Message: "Generating long-form script with Groq AI...",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
 
-		script, err = generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
-		if err != nil {
-			return fmt.Errorf("short script generation: %w", err)
+			script, err = generateLongScript(payload.RawInput, payload.DurationMin, wordCount, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+			if err != nil {
+				return fmt.Errorf("long script generation: %w", err)
+			}
+			script.JobID = job.JobID
+			script.Format = "long"
 		}
-		script.JobID = job.JobID
-		script.Format = "short"
-	}
 
-	// Generate "both" — long + short summary
-	if payload.Format == "both" && script != nil {
-		progress(models.ProgressEvent{
-			JobID: job.JobID, Stage: 2, StageName: "Script Generation",
-			ProgressPct: 70, Message: "Generating Shorts version...",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		})
+		// Generate short-form script
+		if payload.Format == "short" || payload.Format == "both" {
+			progress(models.ProgressEvent{
+				JobID: job.JobID, Stage: 2, StageName: "Script Generation",
+				ProgressPct: 70, Message: "Generating Shorts version...",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			})
 
-		shortScript, err := generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
-		if err != nil {
-			// Non-fatal: log and continue with long only
-			job.AddError(fmt.Sprintf("Short script generation failed: %v", err))
-		} else {
-			script.ShortVersion = &models.ShortScript{
-				Hook:          shortScript.Hook,
-				Segments:      shortScript.Segments,
-				TotalDuration: shortScript.TotalDuration,
+			shortScript, err := generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+			if err != nil {
+				// Non-fatal: log and continue with long only
+				job.AddError(fmt.Sprintf("Short script generation failed: %v", err))
+			} else {
+				if script == nil {
+					script = &models.ScriptDocument{JobID: job.JobID, Format: "short"}
+				}
+				script.ShortVersion = &models.ShortScript{
+					Hook:          shortScript.Hook,
+					Segments:      shortScript.Segments,
+					TotalDuration: shortScript.TotalDuration,
+				}
 			}
 		}
 	}

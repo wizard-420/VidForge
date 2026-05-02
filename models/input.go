@@ -20,9 +20,14 @@ type InputPayload struct {
 	UploadSchedule string `json:"upload_schedule"` // immediate | 19:00 | 20:00 | 21:00
 	CaptionStyle  string `json:"caption_style"`    // bold_white | subtitle | none
 	AutoUpload    bool   `json:"auto_upload"`      // if false, pause before stage 7
-	ClipCount     int    `json:"clip_count"`       // number of stock video clips to fetch
-	ImageCount    int    `json:"image_count"`      // number of AI images to generate
-	CreatedAt     string `json:"created_at"`
+	ClipCount          int                  `json:"clip_count"`       // number of stock video clips to fetch
+	ImageCount         int                  `json:"image_count"`      // number of AI images to generate
+	MusicUrl           string               `json:"music_url"`        // Jamendo track URL
+	MusicStart         int                  `json:"music_start"`      // crop start in seconds
+	MusicEnd           int                  `json:"music_end"`        // crop end in seconds
+	PreGeneratedScript *ScriptDocument      `json:"pre_generated_script,omitempty"` // Used when script is generated via preview
+	ManualAudioBase64  map[int]string       `json:"manual_audio_base64,omitempty"`  // Base64 audio per segment ID
+	CreatedAt          string               `json:"created_at"`
 }
 
 // Validate checks the InputPayload for required fields and valid values
@@ -76,9 +81,9 @@ func (p *InputPayload) Validate() []string {
 		errs = append(errs, "image_count must be between 0 and 20")
 	}
 
-	validMusicModes := map[string]bool{"auto": true, "skip": true}
+	validMusicModes := map[string]bool{"auto": true, "skip": true, "manual": true}
 	if !validMusicModes[p.MusicMode] {
-		errs = append(errs, "music_mode must be one of: auto, skip")
+		errs = append(errs, "music_mode must be one of: auto, skip, manual")
 	}
 
 	validTones := map[string]bool{
