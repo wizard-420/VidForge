@@ -87,6 +87,16 @@
           <div class="voice-card" onclick="setVoice('domi')"><div class="name">🎤 Domi</div><div class="info">Strong, confident</div></div>
           <div class="voice-card" onclick="setVoice('josh')"><div class="name">🎤 Josh</div><div class="info">Young, energetic</div></div>
         </div>
+        
+        <div id="manual-record-section" style="display:none; margin-top: 16px;">
+          <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05);">
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Generate the script first so you can read it and record your voice for each segment.</p>
+            <button class="btn btn-primary premium-btn" style="width: 100%; margin-bottom: 12px;" onclick="generateScriptForRecording()" id="btn-gen-script">Generate Script for Recording</button>
+            <div id="recording-script-container" style="display:none; max-height: 400px; overflow-y: auto; padding-right: 8px;">
+              <!-- Segments rendered here -->
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="card">
@@ -122,12 +132,45 @@
           <div>
             <div class="toggle-group" style="margin-bottom:12px">
               <button class="toggle-btn active" onclick="setMusicMode('auto')">Auto Music</button>
+              <button class="toggle-btn" onclick="setMusicMode('manual')">Manual Search</button>
               <button class="toggle-btn" onclick="setMusicMode('skip')">No Music</button>
             </div>
           </div>
           <div></div>
         </div>
-        <label style="font-size:12px;font-weight:500;color:var(--text-secondary);margin-bottom:8px;display:block">Script Tone</label>
+
+        <div id="manual-music-section" class="premium-glass-panel" style="display:none;">
+          <label class="premium-label">Jamendo Music Search</label>
+          <div class="search-container">
+            <div class="search-input-wrapper">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="jamendo-search" class="premium-input" placeholder="Search keywords, genres..." onkeypress="if(event.key === 'Enter') searchJamendo()">
+            </div>
+            <button class="btn btn-primary premium-btn" onclick="searchJamendo()">Search</button>
+          </div>
+          <div id="jamendo-results" class="jamendo-results-container">
+            <div class="empty-state">Search to find tracks.</div>
+          </div>
+          <div id="selected-track-ui" class="selected-track-panel" style="display: none;">
+            <div class="selected-track-header">
+              <div class="selected-track-title">Selected Track: <span id="selected-track-name"></span></div>
+              <div class="track-badge">Ready</div>
+            </div>
+            <audio id="jamendo-audio" class="premium-audio" controls></audio>
+            <div class="form-row">
+              <div class="slider-group" style="flex: 1;">
+                <label>Crop Start (sec) <span id="music-start-val">0</span></label>
+                <input type="range" id="music-start-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+              </div>
+              <div class="slider-group" style="flex: 1;">
+                <label>Crop End (sec) <span id="music-end-val">0</span></label>
+                <input type="range" id="music-end-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <label class="premium-label">Script Tone</label>
         <div class="tone-chips">
           <button class="tone-chip active" onclick="setTone('dramatic')">🎭 Dramatic</button>
           <button class="tone-chip" onclick="setTone('educational')">📚 Educational</button>

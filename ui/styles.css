@@ -124,17 +124,22 @@ body::before {
 
 /* Cards */
 .card {
-  background: var(--bg-card);
-  border: 1px solid var(--glass-border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+  border: 1px solid rgba(255,255,255,0.06);
   border-radius: var(--radius-lg);
   padding: 24px;
   margin-bottom: 20px;
-  backdrop-filter: blur(12px);
-  transition: var(--transition);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.05);
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.card:hover { border-color: rgba(255,255,255,0.12); }
-.card-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 16px; }
+.card:hover { 
+  border-color: rgba(124,92,252,0.3); 
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.3), 0 0 20px rgba(124,92,252,0.1), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+.card-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: var(--accent-2); margin-bottom: 16px; }
 
 /* Input Tabs */
 .tabs { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 10px; padding: 4px; margin-bottom: 16px; }
@@ -233,23 +238,39 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 /* Toggle */
-.toggle-group { display: flex; gap: 4px; background: var(--bg-secondary); border-radius: 8px; padding: 3px; }
+.toggle-group { 
+  display: flex; gap: 6px; 
+  background: rgba(0,0,0,0.3); 
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 12px; 
+  padding: 6px; 
+}
 
 .toggle-btn {
   flex: 1;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 6px;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  transition: var(--transition);
+  transition: all 0.3s ease;
 }
 
-.toggle-btn.active { background: var(--accent); color: #fff; }
+.toggle-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.03);
+}
+
+.toggle-btn.active { 
+  background: var(--gradient-1); 
+  color: #fff; 
+  box-shadow: 0 4px 12px var(--accent-glow);
+  border-color: rgba(255,255,255,0.1);
+}
 
 /* Voice grid */
 .voice-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
@@ -272,19 +293,33 @@ input[type="range"]::-webkit-slider-thumb {
 .tone-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .tone-chip {
-  padding: 7px 14px;
-  border: 1px solid var(--glass-border);
+  padding: 8px 16px;
+  border: 1px solid rgba(255,255,255,0.08);
   border-radius: 20px;
-  background: transparent;
+  background: rgba(255,255,255,0.02);
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  transition: var(--transition);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
 }
 
-.tone-chip:hover { border-color: var(--accent); color: var(--accent); }
-.tone-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tone-chip:hover { 
+  border-color: var(--accent); 
+  color: #fff; 
+  background: rgba(124,92,252,0.1);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px var(--accent-glow);
+}
+.tone-chip.active { 
+  background: var(--gradient-1); 
+  color: #fff; 
+  border-color: transparent; 
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
 
 /* Select */
 select {
@@ -435,3 +470,203 @@ select:focus { outline: none; border-color: var(--accent); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
 
 .hidden { display: none !important; }
+
+/* ========================================================
+   PREMIUM JAMENDO & MUSIC SECTION UI
+   ======================================================== */
+
+.premium-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent-2);
+  margin-bottom: 12px;
+  display: block;
+}
+
+.premium-glass-panel {
+  margin-bottom: 24px;
+  background: linear-gradient(145deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 8px 32px rgba(0,0,0,0.2);
+  backdrop-filter: blur(20px);
+  padding: 20px;
+  border-radius: 16px;
+  transition: var(--transition);
+}
+
+.premium-glass-panel:hover {
+  border-color: rgba(124,92,252,0.3);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 8px 32px rgba(124,92,252,0.08);
+}
+
+.search-container {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.search-input-wrapper {
+  position: relative;
+  flex: 1;
+}
+
+.search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 14px;
+  opacity: 0.6;
+}
+
+.premium-input {
+  width: 100%;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 12px 16px 12px 40px;
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  transition: all 0.3s ease;
+}
+
+.premium-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: rgba(0,0,0,0.5);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.premium-input::placeholder {
+  color: var(--text-muted);
+}
+
+.premium-btn {
+  padding: 12px 24px;
+  background: var(--gradient-1);
+  border: none;
+  border-radius: 12px;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 12px var(--accent-glow);
+}
+
+.premium-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px var(--accent-glow);
+}
+
+.jamendo-results-container {
+  max-height: 250px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 8px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+  background: rgba(0,0,0,0.2);
+  border-radius: 8px;
+  border: 1px dashed rgba(255,255,255,0.05);
+}
+
+/* Scrollbar for results */
+.jamendo-results-container::-webkit-scrollbar { width: 6px; }
+.jamendo-results-container::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 3px; }
+.jamendo-results-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+.jamendo-results-container::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* Track items added via JS */
+.track-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(255,255,255,0.03);
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.track-item:hover {
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.1);
+  transform: translateX(4px);
+}
+
+.track-item .track-info {
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.track-item .track-artist {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+.selected-track-panel {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.selected-track-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.selected-track-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.selected-track-title span {
+  color: var(--accent-2);
+  margin-left: 6px;
+}
+
+.track-badge {
+  background: rgba(52,211,153,0.15);
+  color: var(--success);
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.premium-audio {
+  width: 100%;
+  height: 40px;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  background: rgba(0,0,0,0.3);
+}
+
+.premium-audio::-webkit-media-controls-panel {
+  background-color: rgba(255,255,255,0.05);
+}
+
+.premium-audio::-webkit-media-controls-current-time-display,
+.premium-audio::-webkit-media-controls-time-remaining-display {
+  color: #fff;
+}

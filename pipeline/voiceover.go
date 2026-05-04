@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"yt-automation-studio/config"
@@ -39,18 +41,40 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 	}
 
 	if payload.VoiceoverMode == "manual" {
-		// Manual mode: user provides their own voice files
+		// Manual mode: user provides their own voice files via Base64 or manual copy
 		progress(models.ProgressEvent{
 			JobID: job.JobID, Stage: 3, StageName: "Voiceover",
 			ProgressPct: 100,
-			Message:     fmt.Sprintf("Manual mode — place %d MP3 files in: %s", len(segments), jobDir),
+			Message:     "Processing manual voiceover audio...",
 			Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		})
 
 		for _, seg := range segments {
 			voicePath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_voice.mp3", seg.SegmentID))
 
-			// If file doesn't exist, create a silent dummy audio so FFmpeg doesn't crash in Stage 6
+			// Check if we received base64 audio for this segment
+			if payload.ManualAudioBase64 != nil {
+				if b64Data, ok := payload.ManualAudioBase64[seg.SegmentID]; ok && b64Data != "" {
+					// Format is typically: data:audio/mp3;base64,... or data:audio/webm;base64,...
+					// We need to write this to a temp file, then convert it to the standardized mp3 format
+					parts := strings.SplitN(b64Data, ",", 2)
+					if len(parts) == 2 {
+						b64Data = parts[1]
+					}
+					
+					decodedAudio, err := base64.StdEncoding.DecodeString(b64Data)
+					if err == nil {
+						tempIn := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_raw.webm", seg.SegmentID))
+						os.WriteFile(tempIn, decodedAudio, 0644)
+						
+						// Convert to standard MP3
+						exec.Command("ffmpeg", "-i", tempIn, "-q:a", "2", "-acodec", "libmp3lame", "-y", voicePath).Run()
+						os.Remove(tempIn)
+					}
+				}
+			}
+
+			// If file STILL doesn't exist, create a silent dummy audio so FFmpeg doesn't crash in Stage 6
 			if _, err := os.Stat(voicePath); os.IsNotExist(err) {
 				log.Printf("⚠️ Manual voice file missing for segment %d, generating silent placeholder", seg.SegmentID)
 				dur := seg.DurationSec
@@ -58,7 +82,7 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 					dur = 10
 				}
 				cmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", fmt.Sprintf("%d", dur), "-q:a", "9", "-acodec", "libmp3lame", "-y", voicePath)
-				_ = cmd.Run()
+				cmd.Run()
 			}
 
 			job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = voicePath

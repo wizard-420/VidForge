@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +42,7 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", handleUpdateSettings)
 	mux.HandleFunc("GET /api/voices", handleGetVoices)
+	mux.HandleFunc("GET /api/music/jamendo/search", handleJamendoSearch)
 	mux.HandleFunc("POST /api/preview-script", handlePreviewScript)
 	mux.HandleFunc("GET /api/status", handleHealthCheck)
 	mux.HandleFunc("/ws/{id}", handleWebSocket)
@@ -380,4 +383,151 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	log.Printf("⚠️  API Error %d: %s", status, message)
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// handleJamendoSearch proxies search requests to Jamendo API to bypass CORS/Adblock issues
+// Matches the Python snippet requirements exactly.
+func handleJamendoSearch(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	mood := r.URL.Query().Get("mood")
+	speed := r.URL.Query().Get("speed")
+	minDur := r.URL.Query().Get("min_dur")
+	maxDur := r.URL.Query().Get("max_dur")
+	limit := r.URL.Query().Get("limit")
+
+	if minDur == "" {
+		minDur = "60"
+	}
+	if maxDur == "" {
+		maxDur = "600"
+	}
+	if limit == "" {
+		limit = "10"
+	}
+	if mood == "" && query == "" {
+		mood = "cinematic"
+	}
+
+	clientID := config.App.JamendoClientID
+	if clientID == "" {
+		clientID = "b6747d04"
+	}
+
+	apiURL, _ := url.Parse("https://api.jamendo.com/v3.0/tracks/")
+	q := apiURL.Query()
+	q.Add("client_id", clientID)
+	q.Add("format", "json")
+	q.Add("limit", limit)
+	q.Add("audioformat", "mp32")
+	q.Add("audiodlformat", "mp32")
+	q.Add("imagesize", "300")
+	q.Add("include", "musicinfo")
+	q.Add("durationbetween", fmt.Sprintf("%s_%s", minDur, maxDur))
+	q.Add("vocalinstrumental", "instrumental")
+	q.Add("boost", "popularity_total")
+	q.Add("type", "albumtrack")
+
+	if query != "" {
+		q.Add("search", query)
+	}
+	if mood != "" {
+		q.Add("fuzzytags", strings.ReplaceAll(mood, " ", "+"))
+	}
+	if speed != "" {
+		q.Add("speed", speed)
+	}
+	apiURL.RawQuery = q.Encode()
+
+	req, _ := http.NewRequest("GET", apiURL.String(), nil)
+	req.Header.Set("User-Agent", "YoutubeAutomationStudio/1.0")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to reach Jamendo: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		http.Error(w, fmt.Sprintf("Jamendo returned %d", resp.StatusCode), resp.StatusCode)
+		return
+	}
+
+	var rawData struct {
+		Results []map[string]interface{} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rawData); err != nil {
+		http.Error(w, "Failed to parse Jamendo JSON", http.StatusInternalServerError)
+		return
+	}
+
+	type Track struct {
+		ID           string      `json:"id"`
+		Name         string      `json:"name"`
+		Artist       string      `json:"artist"`
+		Album        string      `json:"album"`
+		Duration     int         `json:"duration"`
+		Cover        string      `json:"cover"`
+		StreamURL    string      `json:"stream_url"`
+		DownloadURL  string      `json:"download_url"`
+		Waveform     []int       `json:"waveform"`
+		Genre        []string    `json:"genre"`
+		Speed        string      `json:"speed"`
+		LicenseURL   string      `json:"license_url"`
+		Downloadable bool        `json:"downloadable"`
+	}
+
+	var tracks []Track
+	for _, raw := range rawData.Results {
+		// Only downloadable
+		allowed, _ := raw["audiodownload_allowed"].(bool)
+		if !allowed {
+			continue
+		}
+
+		duration := 0
+		if dStr, ok := raw["duration"].(string); ok {
+			duration, _ = strconv.Atoi(dStr)
+		} else if dFloat, ok := raw["duration"].(float64); ok {
+			duration = int(dFloat)
+		}
+
+		t := Track{
+			ID:           fmt.Sprintf("%v", raw["id"]),
+			Name:         strings.TrimSpace(fmt.Sprintf("%v", raw["name"])),
+			Artist:       fmt.Sprintf("%v", raw["artist_name"]),
+			Album:        strings.TrimSpace(fmt.Sprintf("%v", raw["album_name"])),
+			Duration:     duration,
+			Cover:        fmt.Sprintf("%v", raw["album_image"]),
+			StreamURL:    fmt.Sprintf("%v", raw["audio"]),
+			DownloadURL:  fmt.Sprintf("%v", raw["audiodownload"]),
+			LicenseURL:   fmt.Sprintf("%v", raw["license_ccurl"]),
+			Downloadable: allowed,
+		}
+
+		if mInfo, ok := raw["musicinfo"].(map[string]interface{}); ok {
+			t.Speed, _ = mInfo["speed"].(string)
+			if tags, ok := mInfo["tags"].(map[string]interface{}); ok {
+				if genres, ok := tags["genres"].([]interface{}); ok {
+					for _, g := range genres {
+						t.Genre = append(t.Genre, fmt.Sprintf("%v", g))
+					}
+				}
+			}
+		}
+
+		if waveStr, ok := raw["waveform"].(string); ok && waveStr != "" {
+			var wData struct {
+				Peaks []int `json:"peaks"`
+			}
+			json.Unmarshal([]byte(waveStr), &wData)
+			t.Waveform = wData.Peaks
+		}
+
+		tracks = append(tracks, t)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"tracks": tracks})
 }

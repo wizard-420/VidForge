@@ -17,6 +17,7 @@ type Config struct {
 	PexelsAPIKey     string
 	PixabayAPIKey    string
 	OpenAIAPIKey     string
+	JamendoClientID  string
 
 	// YouTube OAuth
 	YouTubeClientSecretFile string
@@ -45,6 +46,7 @@ func Load() {
 		PexelsAPIKey:     getEnv("PEXELS_API_KEY", ""),
 		PixabayAPIKey:    getEnv("PIXABAY_API_KEY", ""),
 		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		JamendoClientID:  getEnv("JAMENDO_CLIENT_ID", "b6747d04"), // default if empty
 
 		YouTubeClientSecretFile: getEnv("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json"),
 		YouTubeTokenFile:        getEnv("YOUTUBE_TOKEN_FILE", "token.json"),
