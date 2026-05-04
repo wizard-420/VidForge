@@ -27,8 +27,10 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	segments := job.Script.Segments
 	isShort := job.Payload.Format == "short"
 	resolution := "1920:1080"
+	width, height := 1920, 1080
 	if isShort {
 		resolution = "1080:1920"
+		width, height = 1080, 1920
 	}
 
 	// Step 6a — Build segment videos from sub-visuals + voice
@@ -73,12 +75,14 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				preparedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_sub_%02d_prep.mp4", seg.SegmentID, j))
 
 				if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
-					// Image → video of sub-clip duration
+					// Image → video of sub-clip duration with Ken Burns zoom
+					frames := int(subClipDuration * 30)
+					vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
 					args := []string{
 						"-loop", "1", "-i", clipPath,
 						"-c:v", "libx264", "-t", fmt.Sprintf("%.1f", subClipDuration),
 						"-pix_fmt", "yuv420p", "-r", "30",
-						"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black", resolution, resolution),
+						"-vf", vf,
 						"-y", preparedPath,
 					}
 					if err := runFFmpeg(args); err != nil {
@@ -139,11 +143,13 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 
 			if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
 				imgVideoPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_imgvid.mp4", seg.SegmentID))
+				frames := seg.DurationSec * 30
+				vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
 				args := []string{
 					"-loop", "1", "-i", clipPath,
 					"-c:v", "libx264", "-t", fmt.Sprintf("%d", seg.DurationSec),
 					"-pix_fmt", "yuv420p", "-r", "30",
-					"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2", resolution, resolution),
+					"-vf", vf,
 					"-y", imgVideoPath,
 				}
 				if err := runFFmpeg(args); err != nil {
