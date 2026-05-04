@@ -85,9 +85,10 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				// "mixed" — respect the AI's choice
 				}
 
+				isShort := payload.Format == "short"
 				if effectiveType == "image" {
 					imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
-					if err := generateDALLEImage(sv.Description, imgPath); err != nil {
+					if err := generateAIImage(sv.Description, imgPath, payload.ScriptTone, isShort); err != nil {
 						log.Printf("⚠️ AI image failed for seg %d sub %d (%v), falling back to stock", seg.SegmentID, j, err)
 						// Fallback to stock clip
 						clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", seg.SegmentID, j))
@@ -105,7 +106,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 						// Fallback: try AI image
 						log.Printf("⚠️ Stock clip failed for seg %d sub %d (%v), trying AI image", seg.SegmentID, j, err)
 						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
-						if err2 := generateDALLEImage(sv.Description, imgPath); err2 != nil {
+						if err2 := generateAIImage(sv.Description, imgPath, payload.ScriptTone, isShort); err2 != nil {
 							return fmt.Errorf("visual fetch seg %d sub %d: stock failed (%v), AI failed (%v)", seg.SegmentID, j, err, err2)
 						}
 						job.ClipFiles[key] = imgPath
@@ -128,10 +129,11 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 			clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_clip.mp4", seg.SegmentID))
 			key := fmt.Sprintf("%d", seg.SegmentID)
 
+			isShort := payload.Format == "short"
 			switch payload.VideoStyle {
 			case "ai_images":
 				imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
-				if err := generateDALLEImage(seg.VisualCue, imgPath); err != nil {
+				if err := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err != nil {
 					if err2 := fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries); err2 != nil {
 						return fmt.Errorf("visual fetch for segment %d: AI failed (%v), stock failed (%v)", seg.SegmentID, err, err2)
 					}
@@ -142,13 +144,13 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				if seg.SegmentID%2 == 1 {
 					if err := fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries); err != nil {
 						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
-						if err2 := generateDALLEImage(seg.VisualCue, imgPath); err2 == nil {
+						if err2 := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err2 == nil {
 							clipPath = imgPath
 						}
 					}
 				} else {
 					imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
-					if err := generateDALLEImage(seg.VisualCue, imgPath); err != nil {
+					if err := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err != nil {
 						_ = fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries)
 					} else {
 						clipPath = imgPath
@@ -293,19 +295,55 @@ func fetchPexelsClip(query, outputPath string) error {
 	return downloadFile(downloadURL, outputPath)
 }
 
-// generateDALLEImage generates an AI image using DALL-E 3
-func generateDALLEImage(prompt, outputPath string) error {
-	apiKey := config.App.OpenAIAPIKey
+// buildAIPrompt enhances the prompt for Flux.1 Schnell based on the selected tone.
+func buildAIPrompt(visualCue, tone string) string {
+	style := "cinematic lighting, high contrast, epic atmosphere, photorealistic"
+	switch tone {
+	case "suspenseful":
+		style = "dark moody lighting, shadows, thriller atmosphere, photorealistic"
+	case "educational":
+		style = "clean bright lighting, documentary style, informative, photorealistic"
+	case "conversational":
+		style = "natural soft lighting, warm tones, approachable, photorealistic"
+	case "motivational":
+		style = "golden hour lighting, uplifting, vibrant colors, photorealistic"
+	case "humorous":
+		style = "bright vivid colors, playful composition, lighthearted, photorealistic"
+	}
+	return fmt.Sprintf("%s, %s, no text, no watermark, 4K quality, wide angle shot", visualCue, style)
+}
+
+// generateAIImage handles generation with fallback (Together AI -> HuggingFace)
+func generateAIImage(prompt, outputPath, tone string, isShort bool) error {
+	err := generateTogetherImage(prompt, outputPath, tone, isShort)
+	if err != nil {
+		log.Printf("⚠️ Together AI failed: %v — falling back to HuggingFace", err)
+		return generateHFImage(prompt, outputPath, tone)
+	}
+	return nil
+}
+
+// generateTogetherImage uses Together AI's free Flux.1 Schnell endpoint
+func generateTogetherImage(prompt, outputPath, tone string, isShort bool) error {
+	apiKey := config.App.TogetherAPIKey
 	if apiKey == "" {
-		return fmt.Errorf("OPENAI_API_KEY not configured")
+		return fmt.Errorf("TOGETHER_API_KEY not configured")
 	}
 
+	width, height := 1792, 1024 // youtube_landscape
+	if isShort {
+		width, height = 1024, 1792 // youtube_short
+	}
+
+	enhancedPrompt := buildAIPrompt(prompt, tone)
+
 	reqBody := map[string]interface{}{
-		"model":   "dall-e-3",
-		"prompt":  fmt.Sprintf("Cinematic still, no text, 16:9 aspect: %s", prompt),
-		"size":    "1792x1024",
-		"quality": "standard",
-		"n":       1,
+		"model":  "black-forest-labs/FLUX.1-schnell-Free",
+		"prompt": enhancedPrompt,
+		"width":  width,
+		"height": height,
+		"steps":  4,
+		"n":      1,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -313,7 +351,7 @@ func generateDALLEImage(prompt, outputPath string) error {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/images/generations", bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", "https://api.together.xyz/v1/images/generations", bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -323,13 +361,13 @@ func generateDALLEImage(prompt, outputPath string) error {
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("OpenAI API request: %w", err)
+		return fmt.Errorf("Together API request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("OpenAI API returned %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("Together API returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var imgResp struct {
@@ -338,14 +376,85 @@ func generateDALLEImage(prompt, outputPath string) error {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&imgResp); err != nil {
-		return fmt.Errorf("parse OpenAI response: %w", err)
+		return fmt.Errorf("parse Together response: %w", err)
 	}
 
 	if len(imgResp.Data) == 0 {
-		return fmt.Errorf("no image generated")
+		return fmt.Errorf("no image generated by Together AI")
 	}
 
 	return downloadFile(imgResp.Data[0].URL, outputPath)
+}
+
+// generateHFImage uses Hugging Face's free Inference API as a fallback
+func generateHFImage(prompt, outputPath, tone string) error {
+	apiKey := config.App.HFAPIKey
+	if apiKey == "" {
+		return fmt.Errorf("HF_API_KEY not configured")
+	}
+
+	enhancedPrompt := buildAIPrompt(prompt, tone)
+	hfURL := "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+
+	reqBody := map[string]interface{}{
+		"inputs": enhancedPrompt,
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	retries := 3
+
+	for attempt := 1; attempt <= retries; attempt++ {
+		req, err := http.NewRequest("POST", hfURL, bytes.NewReader(jsonBody))
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("⚠️ HF request failed attempt %d: %v", attempt, err)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		
+		if resp.StatusCode == 503 {
+			// Model is loading
+			resp.Body.Close()
+			wait := time.Duration(20*attempt) * time.Second
+			log.Printf("⚠️ HF model loading, waiting %v (attempt %d/%d)", wait, attempt, retries)
+			time.Sleep(wait)
+			continue
+		}
+		
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("HF API returned %d: %s", resp.StatusCode, string(body))
+		}
+
+		// HF returns raw image bytes directly
+		outFile, err := os.Create(outputPath)
+		if err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("create file: %w", err)
+		}
+		
+		_, err = io.Copy(outFile, resp.Body)
+		outFile.Close()
+		resp.Body.Close()
+		
+		if err != nil {
+			return fmt.Errorf("save HF image: %w", err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("HuggingFace failed after %d retries", retries)
 }
 
 // downloadFile downloads a file from URL to local path

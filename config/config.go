@@ -17,6 +17,8 @@ type Config struct {
 	PexelsAPIKey     string
 	PixabayAPIKey    string
 	OpenAIAPIKey     string
+	TogetherAPIKey   string
+	HFAPIKey         string
 	JamendoClientID  string
 
 	// YouTube OAuth
@@ -46,6 +48,8 @@ func Load() {
 		PexelsAPIKey:     getEnv("PEXELS_API_KEY", ""),
 		PixabayAPIKey:    getEnv("PIXABAY_API_KEY", ""),
 		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		TogetherAPIKey:   getEnv("TOGETHER_API_KEY", ""),
+		HFAPIKey:         getEnv("HF_API_KEY", ""),
 		JamendoClientID:  getEnv("JAMENDO_CLIENT_ID", "b6747d04"), // default if empty
 
 		YouTubeClientSecretFile: getEnv("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json"),
@@ -76,6 +80,8 @@ func (c *Config) GetMaskedSettings() map[string]interface{} {
 		"pexels_api_key":     maskKey(c.PexelsAPIKey),
 		"pixabay_api_key":    maskKey(c.PixabayAPIKey),
 		"openai_api_key":     maskKey(c.OpenAIAPIKey),
+		"together_api_key":   maskKey(c.TogetherAPIKey),
+		"hf_api_key":         maskKey(c.HFAPIKey),
 		"workspace_dir":      c.WorkspaceDir,
 		"export_dir":         c.ExportDir,
 		"log_level":          c.LogLevel,
@@ -93,6 +99,8 @@ func (c *Config) HasRequiredKeys() map[string]bool {
 		"pexels":     c.PexelsAPIKey != "",
 		"pixabay":    c.PixabayAPIKey != "",
 		"openai":     c.OpenAIAPIKey != "",
+		"together":   c.TogetherAPIKey != "",
+		"hf":         c.HFAPIKey != "",
 	}
 }
 

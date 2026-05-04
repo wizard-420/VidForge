@@ -70,13 +70,19 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 				// Non-fatal: log and continue with long only
 				job.AddError(fmt.Sprintf("Short script generation failed: %v", err))
 			} else {
-				if script == nil {
-					script = &models.ScriptDocument{JobID: job.JobID, Format: "short"}
-				}
-				script.ShortVersion = &models.ShortScript{
-					Hook:          shortScript.Hook,
-					Segments:      shortScript.Segments,
-					TotalDuration: shortScript.TotalDuration,
+				if payload.Format == "short" {
+					script = shortScript
+					script.JobID = job.JobID
+					script.Format = "short"
+				} else {
+					if script == nil {
+						script = &models.ScriptDocument{JobID: job.JobID, Format: "both"}
+					}
+					script.ShortVersion = &models.ShortScript{
+						Hook:          shortScript.Hook,
+						Segments:      shortScript.Segments,
+						TotalDuration: shortScript.TotalDuration,
+					}
 				}
 			}
 		}
@@ -295,4 +301,65 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// RefineScript takes an existing script and a user prompt, and asks Groq to modify it.
+func RefineScript(currentScript *models.ScriptDocument, userPrompt string, config map[string]interface{}) (*models.ScriptDocument, error) {
+	scriptJSON, _ := json.MarshalIndent(currentScript, "", "  ")
+
+	systemPrompt := fmt.Sprintf(`You are an expert YouTube scriptwriter and AI editor.
+The user has an existing YouTube script and wants to make modifications.
+Your job is to read the existing script and the user's instructions, and output a NEW, updated script that perfectly incorporates their requests while maintaining the strict JSON schema.
+
+IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.
+The output MUST follow the EXACT same schema as the input script.`)
+
+	schemaExample := ""
+	if config["format"] == "short" {
+		schemaExample = `{
+  "title_options": ["Title A", "Title B", "Title C"],
+  "description": "Short YouTube description",
+  "tags": ["tag1", "tag2"],
+  "thumbnail_text": "Short punchy text",
+  "hook": "Opening line",
+  "segments": [ ... ]
+}`
+	} else {
+		schemaExample = `{
+  "title_options": ["Title A", "Title B", "Title C"],
+  "description": "Full YouTube description with timestamps and links",
+  "tags": ["tag1", "tag2"],
+  "thumbnail_text": "Short punchy text for thumbnail",
+  "hook": "Opening 5-second line to grab attention",
+  "segments": [ ... ]
+}`
+	}
+
+	userPromptFull := fmt.Sprintf(`Here is the current script:
+%s
+
+Here are the user's modification instructions:
+"%s"
+
+Additional context for the video:
+- Topic: %v
+- Target duration: %v minutes
+- Tone: %v
+- Language: %v
+
+Please rewrite the script incorporating the user's instructions.
+CRITICAL VISUAL RULES (DO NOT BREAK THESE):
+- If the text changes significantly, you MUST update the sub_visuals to match the new text.
+- Each sub_visual query MUST be 2-4 words optimized for Pexels stock video search.
+- Set type to "clip" for stock footage, "image" for AI-generated images.
+- NEVER repeat the same query across sub_visuals. Each must be unique.
+- ALWAYS include the main subject in every query.
+
+Ensure your JSON output includes ALL required fields like "title_options", "description", etc. as shown in this schema format:
+%s
+
+Return the FULL updated script as valid JSON matching the original schema.`,
+		string(scriptJSON), userPrompt, config["raw_input"], config["duration_min"], config["script_tone"], config["language"], schemaExample)
+
+	return callGroqForScript(systemPrompt, userPromptFull)
 }

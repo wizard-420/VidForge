@@ -247,12 +247,13 @@ async function createJob() {
     return;
   }
 
+  if (!state.pre_generated_script) {
+    alert('Please generate and approve the script first before creating the video.');
+    return;
+  }
+
   // Validate manual recordings if applicable
   if (state.voiceover_mode === 'manual') {
-    if (!state.pre_generated_script) {
-      alert('You must generate the script first to record manual audio.');
-      return;
-    }
     const segs = state.pre_generated_script.segments;
     for (let i = 0; i < segs.length; i++) {
       if (!state.manual_audio_base64[segs[i].segment_id]) {
@@ -466,19 +467,27 @@ function truncate(str, len) {
 }
 
 // ==========================================
-// MANUAL VOICEOVER RECORDING LOGIC
+// SCRIPT EDITOR CHAT & VOICEOVER LOGIC
 // ==========================================
 
-async function generateScriptForRecording() {
+let scriptChatHistory = [];
+let currentDraftScript = null;
+
+async function generateScript() {
   if (!state.raw_input.trim()) {
     alert('Please enter a topic, category, or event description first.');
     return;
   }
 
   const btn = document.getElementById('btn-gen-script');
-  const container = document.getElementById('recording-script-container');
   btn.disabled = true;
-  btn.textContent = '⏳ Generating...';
+  btn.innerHTML = '<span class="loading-dots">Generating</span>';
+  
+  // Clear previous state
+  scriptChatHistory = [];
+  currentDraftScript = null;
+  document.getElementById('script-chat-container').style.display = 'none';
+  document.getElementById('recording-script-container').style.display = 'none';
 
   try {
     const res = await fetch(API + '/api/preview-script', {
@@ -502,49 +511,202 @@ async function generateScriptForRecording() {
       throw new Error('Script was generated but contains no segments. Please try again.');
     }
 
-    state.pre_generated_script = script;
+    currentDraftScript = script;
+    
+    // Add initial AI message
+    scriptChatHistory.push({
+      role: 'ai',
+      text: 'Here is your initial script draft based on your topic. You can review it below and ask me to make any changes (e.g. "make the intro more mysterious", "add a segment about X").',
+      script: currentDraftScript
+    });
 
-    // Build delivery direction from the selected tone
-    const toneDirections = {
-      dramatic:       '🎭 Deliver with dramatic weight — slow, intense pauses, build tension',
-      educational:    '📚 Deliver clearly and calmly — like explaining to a curious friend',
-      conversational: '💬 Deliver casually — relaxed, natural rhythm, like talking to a friend',
-      suspenseful:    '😨 Deliver with rising tension — whisper-to-loud shifts, nervous energy',
-      motivational:   '🔥 Deliver with conviction — powerful, uplifting, punchy emphasis',
-      humorous:       '😂 Deliver with playful energy — comedic timing, light sarcasm allowed'
-    };
-    const direction = toneDirections[state.script_tone] || 'Deliver naturally';
-
-    // Render script segments with recording controls
-    container.style.display = 'block';
-    container.innerHTML = `
-      <div class="recording-direction" style="margin-bottom:16px; padding:12px 16px; background: rgba(124,92,252,0.1); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;">
-        <div style="font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:var(--accent); margin-bottom:4px; font-weight:700;">Delivery Direction</div>
-        <div style="font-size:14px; color:#fff;">${direction}</div>
-      </div>
-    ` + script.segments.map(seg => `
-      <div class="recording-segment" style="display:block; margin-bottom:14px; padding:16px; background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06); border-radius:12px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-          <strong style="color:var(--accent-2); font-size:13px;">Segment ${seg.segment_id}</strong>
-          <span class="track-badge">${seg.duration_sec || '—'}s</span>
-        </div>
-        <p style="font-size:14px; line-height:1.7; margin-bottom:14px; color:#e0e0e0; font-family: 'Inter', sans-serif;">${seg.text}</p>
-        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-          <button class="premium-btn" id="btn-rec-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--danger); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="startRecording(${seg.segment_id})">🔴 Record</button>
-          <button class="premium-btn hidden" id="btn-stop-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--accent); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="stopRecording(${seg.segment_id})">⏹ Stop</button>
-          <button class="premium-btn hidden" id="btn-play-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--success); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="playRecording(${seg.segment_id})">▶ Play</button>
-          <span id="rec-status-${seg.segment_id}" style="color:var(--text-secondary); font-size:12px; display:flex; align-items:center; margin-left:4px;"></span>
-        </div>
-      </div>
-    `).join('');
+    renderChat();
+    document.getElementById('script-chat-container').style.display = 'block';
 
   } catch (err) {
     console.error(err);
     alert('Error generating script: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = '📝 Generate Script for Recording';
+    btn.textContent = '📝 Regenerate Script';
   }
+}
+
+function renderScriptPreview(script) {
+  if (!script || !script.segments) return '';
+  
+  const segmentsHtml = script.segments.map(seg => `
+    <div class="script-preview-segment">
+      <div class="script-preview-header">
+        <span class="script-preview-id">Segment ${seg.segment_id} (${seg.type})</span>
+        <span class="script-preview-dur">~${seg.duration_sec}s</span>
+      </div>
+      <div class="script-preview-text">${seg.text}</div>
+    </div>
+  `).join('');
+  
+  return `<div class="script-preview-box">${segmentsHtml}</div>`;
+}
+
+function renderChat() {
+  const historyDiv = document.getElementById('chat-history');
+  
+  historyDiv.innerHTML = scriptChatHistory.map(msg => `
+    <div class="chat-message ${msg.role}">
+      <div class="chat-sender">${msg.role === 'ai' ? '🤖 Script AI' : '👤 You'}</div>
+      <div class="chat-bubble">
+        ${msg.text}
+        ${msg.script ? renderScriptPreview(msg.script) : ''}
+      </div>
+    </div>
+  `).join('');
+  
+  // Scroll to bottom
+  historyDiv.scrollTop = historyDiv.scrollHeight;
+}
+
+async function submitScriptRefinement() {
+  const inputEl = document.getElementById('chat-input');
+  const prompt = inputEl.value.trim();
+  if (!prompt || !currentDraftScript) return;
+  
+  const btn = document.getElementById('btn-send-refinement');
+  const approveBtn = document.getElementById('btn-approve-script');
+  
+  // Add user message to UI
+  scriptChatHistory.push({ role: 'user', text: prompt });
+  inputEl.value = '';
+  renderChat();
+  
+  // Disable inputs while refining
+  inputEl.disabled = true;
+  btn.disabled = true;
+  approveBtn.disabled = true;
+  btn.innerHTML = '<span class="loading-dots"></span>';
+  
+  try {
+    const payload = {
+      current_script: currentDraftScript,
+      user_prompt: prompt,
+      raw_input: state.raw_input,
+      format: state.format,
+      duration_min: state.duration_min,
+      script_tone: state.script_tone,
+      language: state.language,
+      clip_count: state.clip_count,
+      image_count: state.image_count
+    };
+
+    const res = await fetch(API + '/api/refine-script', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Failed to refine script');
+    }
+    
+    const updatedScript = await res.json();
+    currentDraftScript = updatedScript;
+    
+    // Add AI response
+    scriptChatHistory.push({
+      role: 'ai',
+      text: 'I have updated the script based on your feedback.',
+      script: currentDraftScript
+    });
+    
+  } catch (err) {
+    console.error(err);
+    scriptChatHistory.push({
+      role: 'ai',
+      text: '⚠️ Error updating script: ' + err.message
+    });
+  } finally {
+    renderChat();
+    inputEl.disabled = false;
+    btn.disabled = false;
+    approveBtn.disabled = false;
+    btn.textContent = 'Send';
+    inputEl.focus();
+  }
+}
+
+function approveScript() {
+  if (!currentDraftScript) return;
+  
+  // Lock in the script
+  state.pre_generated_script = currentDraftScript;
+  
+  // Hide chat container
+  document.getElementById('script-chat-container').style.display = 'none';
+  document.getElementById('btn-gen-script').style.display = 'none';
+  
+  if (state.voiceover_mode === 'manual') {
+    renderRecordingControls();
+  } else {
+    // AI Mode
+    const container = document.getElementById('recording-script-container');
+    container.style.display = 'block';
+    container.innerHTML = `
+      <div style="padding:16px; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.2); border-radius: 12px; text-align: center;">
+        <div style="font-size:24px; margin-bottom:8px;">✅</div>
+        <div style="font-weight:600; color:var(--success); margin-bottom:4px;">Script Approved!</div>
+        <div style="font-size:13px; color:var(--text-secondary);">The AI will generate voiceover using the selected voice. You can now proceed to generate the video.</div>
+        <button class="btn btn-primary premium-btn" style="margin-top:12px; padding:6px 16px; font-size:12px;" onclick="resetScript()">Edit Script</button>
+      </div>
+    `;
+  }
+}
+
+function resetScript() {
+  state.pre_generated_script = null;
+  document.getElementById('recording-script-container').style.display = 'none';
+  document.getElementById('btn-gen-script').style.display = 'block';
+  document.getElementById('script-chat-container').style.display = 'block';
+}
+
+function renderRecordingControls() {
+  const container = document.getElementById('recording-script-container');
+  const script = state.pre_generated_script;
+  
+  const toneDirections = {
+    dramatic:       '🎭 Deliver with dramatic weight — slow, intense pauses, build tension',
+    educational:    '📚 Deliver clearly and calmly — like explaining to a curious friend',
+    conversational: '💬 Deliver casually — relaxed, natural rhythm, like talking to a friend',
+    suspenseful:    '😨 Deliver with rising tension — whisper-to-loud shifts, nervous energy',
+    motivational:   '🔥 Deliver with conviction — powerful, uplifting, punchy emphasis',
+    humorous:       '😂 Deliver with playful energy — comedic timing, light sarcasm allowed'
+  };
+  const direction = toneDirections[state.script_tone] || 'Deliver naturally';
+
+  container.style.display = 'block';
+  container.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <div style="font-size:14px; font-weight:600; color:var(--success);">✅ Script Approved</div>
+      <button class="btn btn-primary premium-btn" style="padding:4px 12px; font-size:11px;" onclick="resetScript()">Edit Script</button>
+    </div>
+    <div class="recording-direction" style="margin-bottom:16px; padding:12px 16px; background: rgba(124,92,252,0.1); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:var(--accent); margin-bottom:4px; font-weight:700;">Delivery Direction</div>
+      <div style="font-size:14px; color:#fff;">${direction}</div>
+    </div>
+  ` + script.segments.map(seg => `
+    <div class="recording-segment" style="display:block; margin-bottom:14px; padding:16px; background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06); border-radius:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <strong style="color:var(--accent-2); font-size:13px;">Segment ${seg.segment_id}</strong>
+        <span class="track-badge">${seg.duration_sec || '—'}s</span>
+      </div>
+      <p style="font-size:14px; line-height:1.7; margin-bottom:14px; color:#e0e0e0; font-family: 'Inter', sans-serif;">${seg.text}</p>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <button class="premium-btn" id="btn-rec-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--danger); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="startRecording(${seg.segment_id})">🔴 Record</button>
+        <button class="premium-btn hidden" id="btn-stop-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--accent); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="stopRecording(${seg.segment_id})">⏹ Stop</button>
+        <button class="premium-btn hidden" id="btn-play-${seg.segment_id}" style="padding:7px 18px; font-size:12px; background:var(--success); border:none; border-radius:8px; color:#fff; cursor:pointer;" onclick="playRecording(${seg.segment_id})">▶ Play</button>
+        <span id="rec-status-${seg.segment_id}" style="color:var(--text-secondary); font-size:12px; display:flex; align-items:center; margin-left:4px;"></span>
+      </div>
+    </div>
+  `).join('');
 }
 
 async function startRecording(segId) {
@@ -604,3 +766,4 @@ function playRecording(segId) {
 
 // ---- Init ----
 renderHints('category');
+

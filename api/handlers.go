@@ -44,6 +44,7 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/voices", handleGetVoices)
 	mux.HandleFunc("GET /api/music/jamendo/search", handleJamendoSearch)
 	mux.HandleFunc("POST /api/preview-script", handlePreviewScript)
+	mux.HandleFunc("POST /api/refine-script", handleRefineScript)
 	mux.HandleFunc("GET /api/status", handleHealthCheck)
 	mux.HandleFunc("/ws/{id}", handleWebSocket)
 }
@@ -347,6 +348,56 @@ func handlePreviewScript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, job.Script)
+}
+
+// POST /api/refine-script — Refine an existing script
+func handleRefineScript(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		CurrentScript *models.ScriptDocument `json:"current_script"`
+		UserPrompt    string                 `json:"user_prompt"`
+		RawInput      string                 `json:"raw_input"`
+		Format        string                 `json:"format"`
+		DurationMin   int                    `json:"duration_min"`
+		ScriptTone    string                 `json:"script_tone"`
+		Language      string                 `json:"language"`
+		ClipCount     int                    `json:"clip_count"`
+		ImageCount    int                    `json:"image_count"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
+		return
+	}
+
+	if payload.CurrentScript == nil {
+		writeError(w, http.StatusBadRequest, "current_script is required")
+		return
+	}
+	if payload.UserPrompt == "" {
+		writeError(w, http.StatusBadRequest, "user_prompt is required")
+		return
+	}
+
+	config := map[string]interface{}{
+		"raw_input":    payload.RawInput,
+		"format":       payload.Format,
+		"duration_min": payload.DurationMin,
+		"script_tone":  payload.ScriptTone,
+		"language":     payload.Language,
+		"clip_count":   payload.ClipCount,
+		"image_count":  payload.ImageCount,
+	}
+
+	updatedScript, err := pipeline.RefineScript(payload.CurrentScript, payload.UserPrompt, config)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Script refinement failed: "+err.Error())
+		return
+	}
+
+	// Preserve the job ID if it existed
+	updatedScript.JobID = payload.CurrentScript.JobID
+
+	writeJSON(w, http.StatusOK, updatedScript)
 }
 
 // GET /api/status — Health check
