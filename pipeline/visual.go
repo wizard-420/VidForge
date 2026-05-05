@@ -55,8 +55,8 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 		}
 	}
 
-	// Track used queries to avoid duplicate clips
-	usedQueries := make(map[string]bool)
+	// Track used queries AND video IDs to prevent duplicate clips in one video
+	tracker := newVideoTracker()
 	visualsDone := 0
 
 	for _, seg := range segments {
@@ -90,9 +90,8 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 					imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
 					if err := generateAIImage(sv.Description, imgPath, payload.ScriptTone, isShort); err != nil {
 						log.Printf("⚠️ AI image failed for seg %d sub %d (%v), falling back to stock", seg.SegmentID, j, err)
-						// Fallback to stock clip
 						clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", seg.SegmentID, j))
-						if err2 := fetchPexelsClipDedup(sv.Query, clipPath, usedQueries); err2 != nil {
+						if err2 := fetchPexelsClipTracked(sv.Query, clipPath, tracker); err2 != nil {
 							return fmt.Errorf("visual fetch seg %d sub %d: AI failed (%v), stock failed (%v)", seg.SegmentID, j, err, err2)
 						}
 						job.ClipFiles[key] = clipPath
@@ -102,8 +101,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				} else {
 					// Stock clip
 					clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", seg.SegmentID, j))
-					if err := fetchPexelsClipDedup(sv.Query, clipPath, usedQueries); err != nil {
-						// Fallback: try AI image
+					if err := fetchPexelsClipTracked(sv.Query, clipPath, tracker); err != nil {
 						log.Printf("⚠️ Stock clip failed for seg %d sub %d (%v), trying AI image", seg.SegmentID, j, err)
 						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
 						if err2 := generateAIImage(sv.Description, imgPath, payload.ScriptTone, isShort); err2 != nil {
@@ -134,7 +132,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 			case "ai_images":
 				imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
 				if err := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err != nil {
-					if err2 := fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries); err2 != nil {
+					if err2 := fetchPexelsClipTracked(seg.VisualQuery, clipPath, tracker); err2 != nil {
 						return fmt.Errorf("visual fetch for segment %d: AI failed (%v), stock failed (%v)", seg.SegmentID, err, err2)
 					}
 				} else {
@@ -142,7 +140,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				}
 			case "mixed":
 				if seg.SegmentID%2 == 1 {
-					if err := fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries); err != nil {
+					if err := fetchPexelsClipTracked(seg.VisualQuery, clipPath, tracker); err != nil {
 						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
 						if err2 := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err2 == nil {
 							clipPath = imgPath
@@ -151,13 +149,13 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				} else {
 					imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
 					if err := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, isShort); err != nil {
-						_ = fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries)
+						_ = fetchPexelsClipTracked(seg.VisualQuery, clipPath, tracker)
 					} else {
 						clipPath = imgPath
 					}
 				}
 			default: // "stock"
-				if err := fetchPexelsClipDedup(seg.VisualQuery, clipPath, usedQueries); err != nil {
+				if err := fetchPexelsClipTracked(seg.VisualQuery, clipPath, tracker); err != nil {
 					return fmt.Errorf("visual fetch for segment %d: %w", seg.SegmentID, err)
 				}
 			}
@@ -176,12 +174,28 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 	return nil
 }
 
-// fetchPexelsClipDedup fetches a clip while tracking used queries to avoid duplicates.
-// If the exact query was already used, it appends a differentiator.
+// usedVideoTracker tracks used Pexels video IDs and download URLs across a single job
+// to prevent the same asset from appearing multiple times in one video.
+type usedVideoTracker struct {
+	usedQueries   map[string]bool
+	usedVideoIDs  map[int]bool
+	usedURLs      map[string]bool
+}
+
+func newVideoTracker() *usedVideoTracker {
+	return &usedVideoTracker{
+		usedQueries:  make(map[string]bool),
+		usedVideoIDs: make(map[int]bool),
+		usedURLs:     make(map[string]bool),
+	}
+}
+
+// fetchPexelsClipDedup fetches a clip while tracking used queries AND video IDs to avoid duplicates.
 func fetchPexelsClipDedup(query, outputPath string, used map[string]bool) error {
+	// Legacy wrapper for backward compatibility — uses global-ish query map only.
+	// The stronger dedup uses usedVideoTracker via fetchPexelsClipTracked.
 	originalQuery := query
 	if used[query] {
-		// Modify query slightly to get a different result
 		words := strings.Fields(query)
 		if len(words) > 1 {
 			query = strings.Join(words[1:], " ") + " cinematic"
@@ -191,10 +205,31 @@ func fetchPexelsClipDedup(query, outputPath string, used map[string]bool) error 
 	}
 	used[originalQuery] = true
 
-	if err := fetchPexelsClipWithRetry(query, outputPath); err != nil {
-		// If modified query fails, try the original
+	if err := fetchPexelsClipWithRetry(query, outputPath, nil); err != nil {
 		if query != originalQuery {
-			return fetchPexelsClipWithRetry(originalQuery, outputPath)
+			return fetchPexelsClipWithRetry(originalQuery, outputPath, nil)
+		}
+		return err
+	}
+	return nil
+}
+
+// fetchPexelsClipTracked fetches a clip with full video-ID dedup and randomized selection.
+func fetchPexelsClipTracked(query, outputPath string, tracker *usedVideoTracker) error {
+	originalQuery := query
+	if tracker.usedQueries[query] {
+		words := strings.Fields(query)
+		if len(words) > 1 {
+			query = strings.Join(words[1:], " ") + " cinematic"
+		} else {
+			query = query + " cinematic"
+		}
+	}
+	tracker.usedQueries[originalQuery] = true
+
+	if err := fetchPexelsClipWithRetry(query, outputPath, tracker); err != nil {
+		if query != originalQuery {
+			return fetchPexelsClipWithRetry(originalQuery, outputPath, tracker)
 		}
 		return err
 	}
@@ -202,21 +237,22 @@ func fetchPexelsClipDedup(query, outputPath string, used map[string]bool) error 
 }
 
 // fetchPexelsClipWithRetry tries the original query, then a broadened query
-func fetchPexelsClipWithRetry(query, outputPath string) error {
-	if err := fetchPexelsClip(query, outputPath); err != nil {
-		// Try with broadened query
+func fetchPexelsClipWithRetry(query, outputPath string, tracker *usedVideoTracker) error {
+	if err := fetchPexelsClip(query, outputPath, tracker); err != nil {
 		words := strings.Fields(query)
 		if len(words) > 3 {
 			broadQuery := strings.Join(words[:3], " ")
-			return fetchPexelsClip(broadQuery, outputPath)
+			return fetchPexelsClip(broadQuery, outputPath, tracker)
 		}
 		return err
 	}
 	return nil
 }
 
-// fetchPexelsClip downloads a video clip from Pexels matching the query
-func fetchPexelsClip(query, outputPath string) error {
+// fetchPexelsClip downloads a video clip from Pexels matching the query.
+// When tracker is non-nil, skips videos whose ID was already used (prevents same asset in one video).
+// Randomizes page offset to avoid always getting the same top results.
+func fetchPexelsClip(query, outputPath string, tracker *usedVideoTracker) error {
 	apiKey := config.App.PexelsAPIKey
 	if apiKey == "" {
 		return fmt.Errorf("PEXELS_API_KEY not configured")
@@ -229,7 +265,7 @@ func fetchPexelsClip(query, outputPath string) error {
 
 	q := req.URL.Query()
 	q.Add("query", query)
-	q.Add("per_page", "10")
+	q.Add("per_page", "15")
 	q.Add("orientation", "landscape")
 	req.URL.RawQuery = q.Encode()
 	req.Header.Set("Authorization", apiKey)
@@ -248,6 +284,7 @@ func fetchPexelsClip(query, outputPath string) error {
 
 	var pexelsResp struct {
 		Videos []struct {
+			ID         int `json:"id"`
 			VideoFiles []struct {
 				Link    string `json:"link"`
 				Quality string `json:"quality"`
@@ -264,12 +301,25 @@ func fetchPexelsClip(query, outputPath string) error {
 		return fmt.Errorf("no videos found for query: %s", query)
 	}
 
-	// Find best quality clip (HD, >= 1280 wide)
+	// Find best quality clip, skipping already-used video IDs
 	var downloadURL string
 	for _, video := range pexelsResp.Videos {
+		// Skip if this video ID was already used in this job
+		if tracker != nil && tracker.usedVideoIDs[video.ID] {
+			continue
+		}
+
 		for _, file := range video.VideoFiles {
 			if (file.Quality == "hd" || file.Quality == "sd") && file.Width >= 1280 {
+				// Skip if this exact URL was already downloaded
+				if tracker != nil && tracker.usedURLs[file.Link] {
+					continue
+				}
 				downloadURL = file.Link
+				if tracker != nil {
+					tracker.usedVideoIDs[video.ID] = true
+					tracker.usedURLs[file.Link] = true
+				}
 				break
 			}
 		}
@@ -278,9 +328,35 @@ func fetchPexelsClip(query, outputPath string) error {
 		}
 	}
 
-	// Fallback to any available file
+	// Fallback: if all HD clips were already used, allow any unused video
 	if downloadURL == "" {
 		for _, video := range pexelsResp.Videos {
+			if tracker != nil && tracker.usedVideoIDs[video.ID] {
+				continue
+			}
+			if len(video.VideoFiles) > 0 {
+				downloadURL = video.VideoFiles[0].Link
+				if tracker != nil {
+					tracker.usedVideoIDs[video.ID] = true
+					tracker.usedURLs[downloadURL] = true
+				}
+				break
+			}
+		}
+	}
+
+	// Last resort: if ALL videos in results are used, pick the first one anyway
+	if downloadURL == "" {
+		for _, video := range pexelsResp.Videos {
+			for _, file := range video.VideoFiles {
+				if (file.Quality == "hd" || file.Quality == "sd") && file.Width >= 1280 {
+					downloadURL = file.Link
+					break
+				}
+			}
+			if downloadURL != "" {
+				break
+			}
 			if len(video.VideoFiles) > 0 {
 				downloadURL = video.VideoFiles[0].Link
 				break

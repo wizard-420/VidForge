@@ -20,11 +20,15 @@ type InputPayload struct {
 	UploadSchedule string `json:"upload_schedule"` // immediate | 19:00 | 20:00 | 21:00
 	CaptionStyle  string `json:"caption_style"`    // bold_white | subtitle | none
 	AutoUpload    bool   `json:"auto_upload"`      // if false, pause before stage 7
-	ClipCount          int                  `json:"clip_count"`       // number of stock video clips to fetch
-	ImageCount         int                  `json:"image_count"`      // number of AI images to generate
+	ClipCount          int                  `json:"clip_count"`       // number of stock video clips to fetch (auto-derived from SecondsPerVisual when 0)
+	ImageCount         int                  `json:"image_count"`      // number of AI images to generate (auto-derived from SecondsPerVisual + AIImagePercent when 0)
+	SecondsPerVisual   int                  `json:"seconds_per_visual"` // pacing: 1 visual per N seconds of narration (3-15, default 6)
+	AIImagePercent     int                  `json:"ai_image_percent"` // % of visuals that should be AI images vs stock clips (0-100, default 0)
 	MusicUrl           string               `json:"music_url"`        // Jamendo track URL
 	MusicStart         int                  `json:"music_start"`      // crop start in seconds
 	MusicEnd           int                  `json:"music_end"`        // crop end in seconds
+	GCPVoiceName       string               `json:"gcp_voice_name,omitempty"`       // Google Cloud TTS voice name (e.g. "en-US-Neural2-D")
+	GCPLanguageCode    string               `json:"gcp_language_code,omitempty"`    // BCP-47 language code (e.g. "en-US")
 	PreGeneratedScript *ScriptDocument      `json:"pre_generated_script,omitempty"` // Used when script is generated via preview
 	ManualAudioBase64  map[int]string       `json:"manual_audio_base64,omitempty"`  // Base64 audio per segment ID
 	CreatedAt          string               `json:"created_at"`
@@ -54,14 +58,23 @@ func (p *InputPayload) Validate() []string {
 		}
 	}
 
-	validVoiceModes := map[string]bool{"ai": true, "manual": true}
+	validVoiceModes := map[string]bool{"ai": true, "manual": true, "gcp_tts": true}
 	if !validVoiceModes[p.VoiceoverMode] {
-		errs = append(errs, "voiceover_mode must be one of: ai, manual")
+		errs = append(errs, "voiceover_mode must be one of: ai, manual, gcp_tts")
 	}
 
 	validVoices := map[string]bool{"adam": true, "rachel": true, "domi": true, "josh": true}
 	if p.VoiceoverMode == "ai" && !validVoices[p.VoiceID] {
 		errs = append(errs, "voice_id must be one of: adam, rachel, domi, josh")
+	}
+
+	if p.VoiceoverMode == "gcp_tts" {
+		if p.GCPVoiceName == "" {
+			errs = append(errs, "gcp_voice_name is required when voiceover_mode is gcp_tts")
+		}
+		if p.GCPLanguageCode == "" {
+			errs = append(errs, "gcp_language_code is required when voiceover_mode is gcp_tts")
+		}
 	}
 
 	validVideoModes := map[string]bool{"auto": true, "manual": true}
@@ -74,11 +87,17 @@ func (p *InputPayload) Validate() []string {
 		errs = append(errs, "video_style must be one of: stock, ai_images, mixed")
 	}
 
-	if p.ClipCount < 0 || p.ClipCount > 30 {
-		errs = append(errs, "clip_count must be between 0 and 30")
+	if p.ClipCount < 0 || p.ClipCount > 200 {
+		errs = append(errs, "clip_count must be between 0 and 200")
 	}
-	if p.ImageCount < 0 || p.ImageCount > 20 {
-		errs = append(errs, "image_count must be between 0 and 20")
+	if p.ImageCount < 0 || p.ImageCount > 200 {
+		errs = append(errs, "image_count must be between 0 and 200")
+	}
+	if p.SecondsPerVisual != 0 && (p.SecondsPerVisual < 3 || p.SecondsPerVisual > 15) {
+		errs = append(errs, "seconds_per_visual must be between 3 and 15")
+	}
+	if p.AIImagePercent < 0 || p.AIImagePercent > 100 {
+		errs = append(errs, "ai_image_percent must be between 0 and 100")
 	}
 
 	validMusicModes := map[string]bool{"auto": true, "skip": true, "manual": true}
@@ -126,30 +145,40 @@ func (p *InputPayload) SetDefaults() {
 	if p.VideoStyle == "" {
 		p.VideoStyle = "stock"
 	}
-	// Default clip/image counts based on format and style
+	if p.SecondsPerVisual == 0 {
+		p.SecondsPerVisual = 6
+	}
+
+	// Pacing-driven defaults: when ClipCount + ImageCount are both 0, derive
+	// the total visual count from SecondsPerVisual and the estimated duration.
+	// AIImagePercent (and VideoStyle as a fallback) decides the clip/image split.
+	// If the caller explicitly set ClipCount or ImageCount, honor those values.
 	if p.ClipCount == 0 && p.ImageCount == 0 {
-		switch p.VideoStyle {
-		case "stock":
-			if p.Format == "short" {
-				p.ClipCount = 6
-			} else {
-				p.ClipCount = max(p.DurationMin*2, 8)
-			}
-		case "ai_images":
-			if p.Format == "short" {
-				p.ImageCount = 6
-			} else {
-				p.ImageCount = max(p.DurationMin*2, 8)
-			}
-		case "mixed":
-			if p.Format == "short" {
-				p.ClipCount = 4
-				p.ImageCount = 2
-			} else {
-				p.ClipCount = max(p.DurationMin, 4)
-				p.ImageCount = max(p.DurationMin, 4)
+		estDurationSec := p.DurationMin * 60
+		if p.Format == "short" {
+			estDurationSec = 50
+		}
+		totalVisuals := estDurationSec / p.SecondsPerVisual
+		if estDurationSec%p.SecondsPerVisual != 0 {
+			totalVisuals++
+		}
+		if totalVisuals < 3 {
+			totalVisuals = 3
+		}
+
+		// Prefer the explicit AI/clip ratio; fall back to VideoStyle for old clients.
+		aiPct := p.AIImagePercent
+		if aiPct == 0 && p.AIImagePercent == 0 {
+			switch p.VideoStyle {
+			case "ai_images":
+				aiPct = 100
+			case "mixed":
+				aiPct = 40
 			}
 		}
+
+		p.ImageCount = totalVisuals * aiPct / 100
+		p.ClipCount = totalVisuals - p.ImageCount
 	}
 	if p.MusicMode == "" {
 		p.MusicMode = "auto"

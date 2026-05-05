@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,20 @@ import (
 	"yt-automation-studio/config"
 	"yt-automation-studio/models"
 )
+
+// segmentTailPad returns the silence-pad after a segment based on its type.
+// This produces a podcast-like cadence: a tiny breath after the hook,
+// brief pauses between body segments, and a longer outro after the CTA.
+func segmentTailPad(segType string) float64 {
+	switch segType {
+	case "hook":
+		return 0.5
+	case "cta":
+		return 1.0
+	default: // "body" and anything else
+		return 0.4
+	}
+}
 
 // RunVideoRenderer executes Stage 6: FFmpeg video rendering pipeline.
 // Handles multi-clip segments (sub-visuals) where each segment may contain
@@ -55,11 +70,27 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 			continue
 		}
 
+		// VOICE DRIVES TIMING. The actual TTS duration is the source of truth
+		// for this segment. We add a small natural breath pad (varies by type)
+		// and use that as the target for both video and audio.
+		voiceDur := getMediaDuration(voicePath)
+		if voiceDur <= 0 {
+			log.Printf("⚠️ Could not determine voice duration for seg %d, falling back to script estimate", seg.SegmentID)
+			voiceDur = float64(seg.DurationSec)
+		}
+		tailPad := segmentTailPad(seg.Type)
+		segTarget := voiceDur + tailPad
+		segTargetStr := fmt.Sprintf("%.3f", segTarget)
+		log.Printf("📐 Job %s — seg %d (%s): voice=%.3fs + pad=%.2fs → target=%.3fs",
+			job.JobID[:8], seg.SegmentID, seg.Type, voiceDur, tailPad, segTarget)
+
 		var segmentVideoPath string
 
 		if len(seg.SubVisuals) > 0 {
 			// ---- Multi-clip segment: stitch sub-visuals together ----
-			subClipDuration := float64(seg.DurationSec) / float64(len(seg.SubVisuals))
+			// Sub-clip duration is derived from the actual voice timing, not the
+			// LLM's optimistic plan. Each sub-clip gets an even share of segTarget.
+			subClipDuration := segTarget / float64(len(seg.SubVisuals))
 			if subClipDuration < 2 {
 				subClipDuration = 2
 			}
@@ -75,12 +106,11 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				preparedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_sub_%02d_prep.mp4", seg.SegmentID, j))
 
 				if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
-					// Image → video of sub-clip duration with Ken Burns zoom
 					frames := int(subClipDuration * 30)
 					vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
 					args := []string{
 						"-loop", "1", "-i", clipPath,
-						"-c:v", "libx264", "-t", fmt.Sprintf("%.1f", subClipDuration),
+						"-c:v", "libx264", "-t", fmt.Sprintf("%.3f", subClipDuration),
 						"-pix_fmt", "yuv420p", "-r", "30",
 						"-vf", vf,
 						"-y", preparedPath,
@@ -89,11 +119,9 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 						return fmt.Errorf("image to video seg %d sub %d: %w", seg.SegmentID, j, err)
 					}
 				} else {
-					// FIX #4: No -stream_loop — clip plays once, trimmed to duration.
-					// This prevents the same footage from visually repeating.
 					args := []string{
 						"-i", clipPath,
-						"-t", fmt.Sprintf("%.1f", subClipDuration),
+						"-t", fmt.Sprintf("%.3f", subClipDuration),
 						"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black", resolution, resolution),
 						"-c:v", "libx264", "-preset", "fast", "-crf", "23",
 						"-pix_fmt", "yuv420p", "-an", "-r", "30",
@@ -110,7 +138,6 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				continue
 			}
 
-			// Concat sub-clips into one segment video (no audio yet)
 			if len(subClipPaths) == 1 {
 				segmentVideoPath = subClipPaths[0]
 			} else {
@@ -122,8 +149,6 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				os.WriteFile(concatPath, []byte(strings.Join(lines, "\n")), 0644)
 
 				segmentVideoPath = filepath.Join(segDir, fmt.Sprintf("seg_%02d_subcombined.mp4", seg.SegmentID))
-				// FIX #5: Re-encode instead of -c copy to prevent freeze artifacts
-				// from codec/framerate mismatches between different source clips.
 				args := []string{
 					"-f", "concat", "-safe", "0", "-i", concatPath,
 					"-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -143,11 +168,11 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 
 			if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
 				imgVideoPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_imgvid.mp4", seg.SegmentID))
-				frames := seg.DurationSec * 30
+				frames := int(segTarget * 30)
 				vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
 				args := []string{
 					"-loop", "1", "-i", clipPath,
-					"-c:v", "libx264", "-t", fmt.Sprintf("%d", seg.DurationSec),
+					"-c:v", "libx264", "-t", segTargetStr,
 					"-pix_fmt", "yuv420p", "-r", "30",
 					"-vf", vf,
 					"-y", imgVideoPath,
@@ -161,16 +186,23 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 			}
 		}
 
-		// Overlay voiceover audio onto the segment video
+		// Sync filter: video gets padded (clone last frame) and trimmed to segTarget.
+		// Audio (voice) gets padded with silence (apad) to segTarget. The voice plays
+		// for voiceDur seconds, then exactly tailPad seconds of silence — that's the
+		// natural breath that makes segment transitions sound human.
 		syncedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_synced.mp4", seg.SegmentID))
+		filterComplex := fmt.Sprintf(
+			"[0:v]scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black,tpad=stop_mode=clone:stop_duration=%s,trim=duration=%s,setpts=PTS-STARTPTS[v];"+
+				"[1:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS[a]",
+			resolution, resolution, segTargetStr, segTargetStr, segTargetStr, segTargetStr,
+		)
 		args := []string{
 			"-i", segmentVideoPath, "-i", voicePath,
-			"-map", "0:v", "-map", "1:a",
-			"-shortest",
-			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black", resolution, resolution),
+			"-filter_complex", filterComplex,
+			"-map", "[v]", "-map", "[a]",
 			"-c:v", "libx264", "-preset", "fast", "-crf", "23",
 			"-pix_fmt", "yuv420p", "-r", "30",
-			"-c:a", "aac", "-b:a", "192k",
+			"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
 			"-y", syncedPath,
 		}
 		if err := runFFmpeg(args); err != nil {
@@ -198,10 +230,25 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	os.WriteFile(concatListPath, []byte(strings.Join(concatLines, "\n")), 0644)
 
 	rawCombined := filepath.Join(jobDir, "raw_combined.mp4")
-	args := []string{"-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", "-y", rawCombined}
+	// Re-encode during concat to prevent AAC priming/padding gaps from
+	// accumulating between segments. -c copy preserves these gaps and
+	// causes audio-shorter-than-video issues downstream.
+	args := []string{
+		"-f", "concat", "-safe", "0", "-i", concatListPath,
+		"-c:v", "libx264", "-preset", "fast", "-crf", "23",
+		"-pix_fmt", "yuv420p", "-r", "30",
+		"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+		"-fflags", "+genpts",
+		"-y", rawCombined,
+	}
 	if err := runFFmpeg(args); err != nil {
 		return fmt.Errorf("concat: %w", err)
 	}
+
+	// Log durations to verify audio matches video at concat stage
+	rawVideoDur := GetStreamDuration(rawCombined, "v")
+	rawAudioDur := GetStreamDuration(rawCombined, "a")
+	log.Printf("📊 Job %s — raw_combined.mp4: video=%.3fs, audio=%.3fs", job.JobID[:8], rawVideoDur, rawAudioDur)
 
 	// Step 6c — Generate captions with Whisper
 	progress(models.ProgressEvent{
@@ -232,60 +279,216 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	return nil
 }
 
-// finalRender combines video, music (looped to full duration), and captions into the final MP4.
-// Music is looped with -stream_loop -1 and cut to video length by amix duration=first.
+// finalRender uses a 2-pass approach for maximum reliability:
+//  Pass 1: prepare the final audio track of EXACTLY video duration in a separate file.
+//  Pass 2: mux video + prepared audio + captions, then verify final durations.
 func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle string, isShort bool) error {
-	// Build caption style
-	fontSize := "14"
-	if isShort {
-		fontSize = "22"
-	}
-	fontStyle := fmt.Sprintf("FontName=Arial,FontSize=%s,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,Alignment=2", fontSize)
-
-	if captionStyle == "subtitle" {
-		fontStyle = fmt.Sprintf("FontName=Arial,FontSize=%s,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=1,Shadow=0,Alignment=2", fontSize)
-	}
-
-	var args []string
-
 	hasCaptions := fileExists(captionsPath) && captionStyle != "none"
 	hasMusic := musicPath != "" && fileExists(musicPath)
 
-	if hasMusic && hasCaptions {
-		// Music is looped indefinitely with -stream_loop, amix duration=first cuts it at voice end
+	// Get exact video duration; this becomes the master length for the entire output.
+	videoDuration := getMediaDuration(videoPath)
+	if videoDuration <= 0 {
+		return fmt.Errorf("could not determine video duration for %s", videoPath)
+	}
+	durStr := fmt.Sprintf("%.3f", videoDuration)
+	jobDir := filepath.Dir(outputPath)
+
+	// Pre-loop music to cover the video duration with buffer.
+	loopedMusicPath := ""
+	if hasMusic {
+		loopedMusicPath = filepath.Join(jobDir, "music_looped.mp3")
+		if err := loopMusicToFitDuration(musicPath, loopedMusicPath, videoDuration); err != nil {
+			log.Printf("⚠️ Music loop failed: %v — proceeding without music", err)
+			loopedMusicPath = ""
+			hasMusic = false
+		}
+	}
+
+	// Pass 1: Prepare the final audio track to a separate file
+	preparedAudioPath := filepath.Join(jobDir, "final_audio.m4a")
+	if err := prepareFinalAudio(videoPath, loopedMusicPath, preparedAudioPath, videoDuration, hasMusic); err != nil {
+		return fmt.Errorf("prepare final audio: %w", err)
+	}
+
+	// Verify the prepared audio duration matches video duration
+	preparedAudioDur := getMediaDuration(preparedAudioPath)
+	log.Printf("📊 finalRender: video=%.3fs, prepared audio=%.3fs (diff=%.3fs)",
+		videoDuration, preparedAudioDur, preparedAudioDur-videoDuration)
+
+	// Pass 2: Mux video + prepared audio (+ captions if applicable)
+	var args []string
+	if hasCaptions {
+		fontSize := "14"
+		if isShort {
+			fontSize = "22"
+		}
+		fontStyle := fmt.Sprintf("FontName=Arial,FontSize=%s,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,Alignment=2", fontSize)
+		if captionStyle == "subtitle" {
+			fontStyle = fmt.Sprintf("FontName=Arial,FontSize=%s,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=1,Shadow=0,Alignment=2", fontSize)
+		}
 		args = []string{
 			"-i", videoPath,
-			"-stream_loop", "-1", "-i", musicPath,
-			"-filter_complex",
-			"[0:a]volume=1.0[voice];[1:a]volume=0.12[music];[voice][music]amix=inputs=2:duration=first[aout]",
+			"-i", preparedAudioPath,
 			"-vf", fmt.Sprintf("subtitles=%s:force_style='%s'", filepath.ToSlash(captionsPath), fontStyle),
-			"-map", "0:v", "-map", "[aout]",
+			"-map", "0:v", "-map", "1:a",
+			"-t", durStr,
 			"-c:v", "libx264", "-preset", "medium", "-crf", "21",
 			"-c:a", "aac", "-b:a", "192k",
-			"-movflags", "+faststart", "-y", outputPath,
-		}
-	} else if hasCaptions {
-		args = []string{
-			"-i", videoPath,
-			"-vf", fmt.Sprintf("subtitles=%s:force_style='%s'", filepath.ToSlash(captionsPath), fontStyle),
-			"-c:v", "libx264", "-preset", "medium", "-crf", "21",
-			"-c:a", "copy", "-movflags", "+faststart", "-y", outputPath,
-		}
-	} else if hasMusic {
-		// Music looped to cover full video duration
-		args = []string{
-			"-i", videoPath,
-			"-stream_loop", "-1", "-i", musicPath,
-			"-filter_complex", "[0:a]volume=1.0[voice];[1:a]volume=0.12[music];[voice][music]amix=inputs=2:duration=first[aout]",
-			"-map", "0:v", "-map", "[aout]",
-			"-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+			"-shortest",
+			"-avoid_negative_ts", "make_zero",
 			"-movflags", "+faststart", "-y", outputPath,
 		}
 	} else {
-		// Just copy
-		args = []string{"-i", videoPath, "-c", "copy", "-movflags", "+faststart", "-y", outputPath}
+		args = []string{
+			"-i", videoPath,
+			"-i", preparedAudioPath,
+			"-map", "0:v", "-map", "1:a",
+			"-t", durStr,
+			"-c:v", "copy",
+			"-c:a", "aac", "-b:a", "192k",
+			"-shortest",
+			"-avoid_negative_ts", "make_zero",
+			"-movflags", "+faststart", "-y", outputPath,
+		}
 	}
 
+	err := runFFmpeg(args)
+
+	// Cleanup
+	os.Remove(preparedAudioPath)
+	if loopedMusicPath != "" {
+		os.Remove(loopedMusicPath)
+	}
+
+	if err == nil {
+		// Verify final output durations
+		finalVideoDur := GetStreamDuration(outputPath, "v")
+		finalAudioDur := GetStreamDuration(outputPath, "a")
+		log.Printf("✅ finalRender output: video=%.3fs, audio=%.3fs (diff=%.3fs)",
+			finalVideoDur, finalAudioDur, finalAudioDur-finalVideoDur)
+	}
+
+	return err
+}
+
+// prepareFinalAudio generates a complete audio track of exactly targetDuration seconds.
+// It pads the voice with silence to match duration, optionally mixes in music.
+func prepareFinalAudio(videoPath, musicPath, outputPath string, targetDuration float64, hasMusic bool) error {
+	durStr := fmt.Sprintf("%.3f", targetDuration)
+
+	var args []string
+	if hasMusic {
+		// Mix voice (padded to duration) + music (already pre-looped to >= duration)
+		filterComplex := fmt.Sprintf(
+			"[0:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS,volume=1.0[voice];"+
+				"[1:a]atrim=duration=%s,asetpts=PTS-STARTPTS,volume=0.12[music];"+
+				"[voice][music]amix=inputs=2:duration=longest:dropout_transition=0[aout]",
+			durStr, durStr, durStr,
+		)
+		args = []string{
+			"-i", videoPath,
+			"-i", musicPath,
+			"-filter_complex", filterComplex,
+			"-map", "[aout]",
+			"-t", durStr,
+			"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+			"-y", outputPath,
+		}
+	} else {
+		// Just pad voice to duration
+		filterComplex := fmt.Sprintf(
+			"[0:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS[aout]",
+			durStr, durStr,
+		)
+		args = []string{
+			"-i", videoPath,
+			"-filter_complex", filterComplex,
+			"-map", "[aout]",
+			"-t", durStr,
+			"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+			"-y", outputPath,
+		}
+	}
+
+	return runFFmpeg(args)
+}
+
+// GetStreamDuration returns the duration of a specific stream type ("v" or "a") in seconds.
+// Exported for use by API handlers that need to verify stream durations.
+func GetStreamDuration(filePath, streamType string) float64 {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", streamType+":0",
+		"-show_entries", "stream=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	var dur float64
+	fmt.Sscanf(strings.TrimSpace(string(output)), "%f", &dur)
+	if dur > 0 {
+		return dur
+	}
+	// Fallback to format duration if stream duration is missing
+	return getMediaDuration(filePath)
+}
+
+// getMediaDuration returns the duration of a media file in seconds using ffprobe.
+func getMediaDuration(filePath string) float64 {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	var dur float64
+	fmt.Sscanf(strings.TrimSpace(string(output)), "%f", &dur)
+	return dur
+}
+
+// loopMusicToFitDuration creates a new audio file by concatenating the music enough times
+// to guarantee it covers the target duration. This avoids -stream_loop reliability issues.
+func loopMusicToFitDuration(musicPath, outputPath string, targetDuration float64) error {
+	musicDuration := getMediaDuration(musicPath)
+	if musicDuration <= 0 {
+		return fmt.Errorf("cannot determine music duration")
+	}
+
+	// If music is already long enough, just copy it
+	if musicDuration >= targetDuration+5 {
+		args := []string{"-i", musicPath, "-c", "copy", "-y", outputPath}
+		return runFFmpeg(args)
+	}
+
+	// Calculate how many times we need to repeat
+	repeats := int(targetDuration/musicDuration) + 2
+
+	// Build a concat list file
+	concatPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + "_concat.txt"
+	var lines []string
+	for i := 0; i < repeats; i++ {
+		lines = append(lines, fmt.Sprintf("file '%s'", filepath.ToSlash(musicPath)))
+	}
+	if err := os.WriteFile(concatPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		return fmt.Errorf("write concat list: %w", err)
+	}
+	defer os.Remove(concatPath)
+
+	// Concatenate and trim to target duration + small buffer
+	args := []string{
+		"-f", "concat", "-safe", "0", "-i", concatPath,
+		"-t", fmt.Sprintf("%.1f", targetDuration+10),
+		"-c:a", "libmp3lame", "-b:a", "192k",
+		"-y", outputPath,
+	}
 	return runFFmpeg(args)
 }
 

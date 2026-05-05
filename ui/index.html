@@ -33,212 +33,316 @@
     <div id="page-create">
       <div class="page-header">
         <h2>Create New Video</h2>
-        <p>Configure your video pipeline and hit generate</p>
+        <p>Configure your video pipeline step by step</p>
       </div>
 
-      <!-- Input Type -->
-      <div class="card">
-        <div class="card-title">📝 Content Input</div>
-        <div class="tabs" id="input-tabs">
-          <button class="tab active" onclick="setInputType('category')">Category</button>
-          <button class="tab" onclick="setInputType('topic')">Specific Topic</button>
-          <button class="tab" onclick="setInputType('event')">Event / Story</button>
-        </div>
-        <textarea id="raw-input" placeholder="e.g. Dark History, Ancient Civilizations, Tech Scandals..." oninput="state.raw_input=this.value"></textarea>
-        <div class="hints" id="hint-chips"></div>
+      <!-- Wizard Stepper -->
+      <div class="wizard-stepper">
+        <div class="wizard-step active" data-wstep="0" onclick="wizardJumpTo(0)"><span class="wizard-step-num">1</span><span class="wizard-step-label">Content</span></div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-wstep="1" onclick="wizardJumpTo(1)"><span class="wizard-step-num">2</span><span class="wizard-step-label">Format</span></div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-wstep="2" onclick="wizardJumpTo(2)"><span class="wizard-step-num">3</span><span class="wizard-step-label">Script</span></div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-wstep="3" onclick="wizardJumpTo(3)"><span class="wizard-step-num">4</span><span class="wizard-step-label">Visuals</span></div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-wstep="4" onclick="wizardJumpTo(4)"><span class="wizard-step-num">5</span><span class="wizard-step-label">Music</span></div>
+        <div class="wizard-step-line"></div>
+        <div class="wizard-step" data-wstep="5" onclick="wizardJumpTo(5)"><span class="wizard-step-num">6</span><span class="wizard-step-label">Finalize</span></div>
       </div>
 
-      <!-- Format -->
-      <div class="card">
-        <div class="card-title">📐 Format</div>
-        <div class="format-grid">
-          <div class="format-card active" onclick="setFormat('long')">
-            <div class="icon">📺</div>
-            <div class="label">Long-form</div>
-            <div class="desc">8–20 min video</div>
-          </div>
-          <div class="format-card" onclick="setFormat('short')">
-            <div class="icon">📱</div>
-            <div class="label">Shorts</div>
-            <div class="desc">45–60 sec</div>
-          </div>
-          <div class="format-card" onclick="setFormat('both')">
-            <div class="icon">🎯</div>
-            <div class="label">Both</div>
-            <div class="desc">Long + Short</div>
-          </div>
-        </div>
-        <div class="slider-group" id="duration-slider">
-          <label>Duration <span id="dur-val">8 min</span></label>
-          <input type="range" min="5" max="20" value="8" oninput="state.duration_min=+this.value;document.getElementById('dur-val').textContent=this.value+' min'">
-        </div>
-      </div>
+      <!-- Wizard Body -->
+      <div class="wizard-body">
 
-      <!-- Voice & Video -->
-      <div class="card">
-        <div class="card-title">🎙️ Voiceover & Script</div>
-        <div class="toggle-group">
-          <button class="toggle-btn active" onclick="setVoiceMode('ai')">AI Voice</button>
-          <button class="toggle-btn" onclick="setVoiceMode('manual')">Manual Record</button>
-        </div>
-        <div class="voice-grid" id="voice-grid">
-          <div class="voice-card active" onclick="setVoice('adam')"><div class="name">🎤 Adam</div><div class="info">Deep, authoritative</div></div>
-          <div class="voice-card" onclick="setVoice('rachel')"><div class="name">🎤 Rachel</div><div class="info">Warm, professional</div></div>
-          <div class="voice-card" onclick="setVoice('domi')"><div class="name">🎤 Domi</div><div class="info">Strong, confident</div></div>
-          <div class="voice-card" onclick="setVoice('josh')"><div class="name">🎤 Josh</div><div class="info">Young, energetic</div></div>
-        </div>
-        
-        <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); margin-top: 16px;">
-          <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Generate the script to review, modify via AI chat, and approve it.</p>
-          <button class="btn btn-primary premium-btn" style="width: 100%; margin-bottom: 12px;" onclick="generateScript()" id="btn-gen-script">📝 Generate Script</button>
-          
-          <div id="script-chat-container" style="display:none;">
-            <div id="chat-history" class="chat-history">
-              <!-- Chat messages rendered here -->
+        <!-- Step 0: Content Input -->
+        <div class="wizard-panel active" data-panel="0">
+          <div class="card">
+            <div class="card-title">📝 Content Input</div>
+            <div class="tabs" id="input-tabs">
+              <button class="tab active" onclick="setInputType('category')">Category</button>
+              <button class="tab" onclick="setInputType('topic')">Specific Topic</button>
+              <button class="tab" onclick="setInputType('event')">Event / Story</button>
             </div>
-            
-            <div id="chat-input-area" class="chat-input-area">
-              <input type="text" id="chat-input" class="premium-input" placeholder="e.g. 'Make the intro punchier' or 'Change the tone to humorous'" onkeypress="if(event.key === 'Enter') submitScriptRefinement()">
-              <button class="premium-btn" onclick="submitScriptRefinement()" id="btn-send-refinement" style="padding: 0 16px; border-radius: 8px; background: var(--accent); color: white; border: none; cursor: pointer;">Send</button>
-            </div>
-            
-            <button class="btn btn-success premium-btn" style="width: 100%; margin-top: 12px; background: var(--success); border-color: var(--success);" onclick="approveScript()" id="btn-approve-script">✅ Approve Script</button>
+            <textarea id="raw-input" placeholder="e.g. Dark History, Ancient Civilizations, Tech Scandals..." oninput="state.raw_input=this.value"></textarea>
+            <div class="hints" id="hint-chips"></div>
           </div>
-          
-          <!-- Manual Recording Controls Container (only visible when approved in manual mode) -->
-          <div id="recording-script-container" style="display:none; margin-top: 16px;">
-            <!-- Segments rendered here -->
+          <div class="wizard-nav">
+            <div></div>
+            <button class="wizard-btn wizard-btn-next" onclick="wizardNext()">Next: Format →</button>
           </div>
         </div>
-      </div>
 
-      <div class="card">
-        <div class="card-title">🎬 Video Generation</div>
-        <div class="toggle-group">
-          <button class="toggle-btn active" onclick="setVideoMode('auto')">Auto Generate</button>
-          <button class="toggle-btn" onclick="setVideoMode('manual')">Manual Clips</button>
-        </div>
-        <div class="hints" style="margin-top:10px" id="style-chips">
-          <span class="hint active" onclick="setVideoStyle('stock')">📹 Stock Footage</span>
-          <span class="hint" onclick="setVideoStyle('ai_images')">🎨 AI Images</span>
-          <span class="hint" onclick="setVideoStyle('mixed')">🔀 Mixed</span>
-        </div>
-        <div id="media-counts" style="margin-top:16px">
-          <div class="form-row">
-            <div class="slider-group" id="clip-count-group">
-              <label>Stock Video Clips <span id="clip-val">6</span></label>
-              <input type="range" min="0" max="20" value="6" oninput="state.clip_count=+this.value;document.getElementById('clip-val').textContent=this.value">
+        <!-- Step 1: Format -->
+        <div class="wizard-panel" data-panel="1">
+          <div class="card">
+            <div class="card-title">📐 Format</div>
+            <div class="format-grid">
+              <div class="format-card active" onclick="setFormat('long')">
+                <div class="icon">📺</div>
+                <div class="label">Long-form</div>
+                <div class="desc">8–20 min video</div>
+              </div>
+              <div class="format-card" onclick="setFormat('short')">
+                <div class="icon">📱</div>
+                <div class="label">Shorts</div>
+                <div class="desc">45–60 sec</div>
+              </div>
+              <div class="format-card" onclick="setFormat('both')">
+                <div class="icon">🎯</div>
+                <div class="label">Both</div>
+                <div class="desc">Long + Short</div>
+              </div>
             </div>
-            <div class="slider-group" id="image-count-group" style="display:none">
-              <label>AI Images <span id="img-val">0</span></label>
-              <input type="range" min="0" max="15" value="0" oninput="state.image_count=+this.value;document.getElementById('img-val').textContent=this.value">
+            <div class="slider-group" id="duration-slider">
+              <label>Target Duration <span id="dur-val">~8 min</span></label>
+              <input type="range" min="5" max="20" value="8" oninput="state.duration_min=+this.value;document.getElementById('dur-val').textContent='~'+this.value+' min';if(typeof updateVisualsPreview==='function')updateVisualsPreview()">
+              <div class="hint" style="font-size:0.78rem;opacity:0.7;margin-top:4px;">Approximate — final length follows the actual narration pace.</div>
             </div>
           </div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Total visuals are distributed evenly across the video and aligned to the script.</div>
+          <div class="wizard-nav">
+            <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
+            <button class="wizard-btn wizard-btn-next" onclick="wizardNext()">Next: Script →</button>
+          </div>
         </div>
-      </div>
 
-      <!-- Music & Tone -->
-      <div class="card">
-        <div class="card-title">🎵 Music & Tone</div>
-        <div class="form-row">
-          <div>
+        <!-- Step 2: Voiceover & Script -->
+        <div class="wizard-panel" data-panel="2">
+          <div class="card">
+            <div class="card-title">🎙️ Voiceover & Script</div>
+            <div class="toggle-group">
+              <button class="toggle-btn active" onclick="setVoiceMode('ai')">AI Voice</button>
+              <button class="toggle-btn" onclick="setVoiceMode('gcp_tts')">Google TTS</button>
+              <button class="toggle-btn" onclick="setVoiceMode('manual')">Manual Record</button>
+            </div>
+            <div class="voice-grid" id="voice-grid">
+              <div class="voice-card active" onclick="setVoice('adam')"><div class="name">🎤 Adam</div><div class="info">Deep, authoritative</div></div>
+              <div class="voice-card" onclick="setVoice('rachel')"><div class="name">🎤 Rachel</div><div class="info">Warm, professional</div></div>
+              <div class="voice-card" onclick="setVoice('domi')"><div class="name">🎤 Domi</div><div class="info">Strong, confident</div></div>
+              <div class="voice-card" onclick="setVoice('josh')"><div class="name">🎤 Josh</div><div class="info">Young, energetic</div></div>
+            </div>
+
+            <!-- Google Cloud TTS Panel -->
+            <div id="gcp-tts-panel" style="display:none; margin-top: 16px;">
+              <div class="gcp-tts-config">
+                <div class="gcp-tts-row">
+                  <div class="gcp-tts-field">
+                    <label class="premium-label">Language</label>
+                    <select id="gcp-language-select" class="premium-select" onchange="loadGCPVoices(this.value)">
+                      <option value="en-US">English (US)</option>
+                      <option value="en-GB">English (UK)</option>
+                      <option value="en-IN">English (India)</option>
+                      <option value="hi-IN">Hindi</option>
+                      <option value="es-ES">Spanish</option>
+                      <option value="fr-FR">French</option>
+                      <option value="de-DE">German</option>
+                      <option value="ja-JP">Japanese</option>
+                      <option value="ko-KR">Korean</option>
+                      <option value="pt-BR">Portuguese (Brazil)</option>
+                      <option value="ar-XA">Arabic</option>
+                      <option value="cmn-CN">Chinese (Mandarin)</option>
+                    </select>
+                  </div>
+                  <div class="gcp-tts-field">
+                    <label class="premium-label">Voice</label>
+                    <select id="gcp-voice-select" class="premium-select" onchange="setGCPVoice(this.value)">
+                      <option value="">Select language first...</option>
+                    </select>
+                  </div>
+                </div>
+                <div id="gcp-voice-info" class="gcp-voice-info" style="display:none;"></div>
+              </div>
+              <div id="gcp-tts-preview-container" style="display:none; margin-top: 16px;"></div>
+            </div>
+
+            <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.05); margin-top: 16px;">
+              <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Generate the script to review, modify via AI chat, and approve it.</p>
+              <button class="btn btn-primary premium-btn" style="width: 100%; margin-bottom: 12px;" onclick="generateScript()" id="btn-gen-script">📝 Generate Script</button>
+
+              <div id="script-chat-container" style="display:none;">
+                <div id="chat-history" class="chat-history"></div>
+                <div id="chat-input-area" class="chat-input-area">
+                  <input type="text" id="chat-input" class="premium-input" placeholder="e.g. 'Make the intro punchier' or 'Change the tone to humorous'" onkeypress="if(event.key === 'Enter') submitScriptRefinement()">
+                  <button class="premium-btn" onclick="submitScriptRefinement()" id="btn-send-refinement" style="padding: 0 16px; border-radius: 8px; background: var(--accent); color: white; border: none; cursor: pointer;">Send</button>
+                </div>
+                <button class="btn btn-success premium-btn" style="width: 100%; margin-top: 12px; background: var(--success); border-color: var(--success);" onclick="approveScript()" id="btn-approve-script">✅ Approve Script</button>
+              </div>
+
+              <div id="recording-script-container" style="display:none; margin-top: 16px;"></div>
+            </div>
+
+            <div style="margin-top: 16px;">
+              <label class="premium-label">Script Tone</label>
+              <div class="tone-chips">
+                <button class="tone-chip active" onclick="setTone('dramatic')">🎭 Dramatic</button>
+                <button class="tone-chip" onclick="setTone('educational')">📚 Educational</button>
+                <button class="tone-chip" onclick="setTone('conversational')">💬 Conversational</button>
+                <button class="tone-chip" onclick="setTone('suspenseful')">😰 Suspenseful</button>
+                <button class="tone-chip" onclick="setTone('motivational')">💪 Motivational</button>
+                <button class="tone-chip" onclick="setTone('humorous')">😄 Humorous</button>
+              </div>
+            </div>
+          </div>
+          <div class="wizard-nav">
+            <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
+            <button class="wizard-btn wizard-btn-next" onclick="wizardNext()">Next: Visuals →</button>
+          </div>
+        </div>
+
+        <!-- Step 3: Video Generation -->
+        <div class="wizard-panel" data-panel="3">
+          <div class="card">
+            <div class="card-title">🎬 Video Generation</div>
+            <div class="toggle-group">
+              <button class="toggle-btn active" onclick="setVideoMode('auto')">Auto Generate</button>
+              <button class="toggle-btn" onclick="setVideoMode('manual')">Manual Clips</button>
+            </div>
+            <div id="media-counts" style="margin-top:16px">
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Visual Pacing</div>
+              <div class="hints" id="pacing-chips">
+                <span class="hint" onclick="setPacing('cinematic')" data-pacing="cinematic">🎬 Cinematic <small style="opacity:0.7;margin-left:4px">~10s</small></span>
+                <span class="hint active" onclick="setPacing('balanced')" data-pacing="balanced">🎯 Balanced <small style="opacity:0.7;margin-left:4px">~6s</small></span>
+                <span class="hint" onclick="setPacing('energetic')" data-pacing="energetic">⚡ Energetic <small style="opacity:0.7;margin-left:4px">~3.5s</small></span>
+                <span class="hint" onclick="setPacing('custom')" data-pacing="custom">🛠 Custom</span>
+              </div>
+              <div class="slider-group" id="pacing-custom-group" style="margin-top:12px;display:none">
+                <label>1 visual every <span id="pacing-val">6</span> seconds</label>
+                <input type="range" min="3" max="15" value="6" id="pacing-slider" oninput="onPacingSliderChange(+this.value)">
+              </div>
+
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin:18px 0 8px;">AI Image Mix</div>
+              <div class="slider-group" id="ai-mix-group">
+                <label><span id="ai-mix-val">0</span>% AI images, <span id="stock-mix-val">100</span>% stock footage</label>
+                <input type="range" min="0" max="100" value="0" step="5" id="ai-mix-slider" oninput="onAIMixSliderChange(+this.value)">
+              </div>
+
+              <div id="visuals-preview" style="font-size:12px;color:var(--text-muted);margin-top:14px;padding:10px 12px;background:rgba(111,184,160,0.06);border:1px solid var(--glass-border);border-radius:8px;">
+                ≈ 80 visuals across your 8-min video — one new shot every 6 seconds.
+              </div>
+            </div>
+          </div>
+          <div class="wizard-nav">
+            <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
+            <button class="wizard-btn wizard-btn-next" onclick="wizardNext()">Next: Music →</button>
+          </div>
+        </div>
+
+        <!-- Step 4: Music -->
+        <div class="wizard-panel" data-panel="4">
+          <div class="card">
+            <div class="card-title">🎵 Music</div>
             <div class="toggle-group" style="margin-bottom:12px">
               <button class="toggle-btn active" onclick="setMusicMode('auto')">Auto Music</button>
               <button class="toggle-btn" onclick="setMusicMode('manual')">Manual Search</button>
               <button class="toggle-btn" onclick="setMusicMode('skip')">No Music</button>
             </div>
+
+            <div id="auto-music-genre" class="auto-music-genre-panel">
+              <label class="premium-label">Music Genre (based on script tone)</label>
+              <div class="tone-chips" id="music-tone-chips">
+                <button class="tone-chip active" onclick="setTone('dramatic')">🎭 Dramatic</button>
+                <button class="tone-chip" onclick="setTone('educational')">📚 Educational</button>
+                <button class="tone-chip" onclick="setTone('conversational')">💬 Conversational</button>
+                <button class="tone-chip" onclick="setTone('suspenseful')">😰 Suspenseful</button>
+                <button class="tone-chip" onclick="setTone('motivational')">💪 Motivational</button>
+                <button class="tone-chip" onclick="setTone('humorous')">😄 Humorous</button>
+              </div>
+              <div id="auto-music-desc" class="auto-music-desc">Auto music will match: <strong>cinematic dramatic epic</strong></div>
+            </div>
+
+            <div id="manual-music-section" class="premium-glass-panel" style="display:none;">
+              <label class="premium-label">Jamendo Music Search</label>
+              <div class="search-container">
+                <div class="search-input-wrapper">
+                  <span class="search-icon">🔍</span>
+                  <input type="text" id="jamendo-search" class="premium-input" placeholder="Search keywords, genres..." onkeypress="if(event.key === 'Enter') searchJamendo()">
+                </div>
+                <button class="btn btn-primary premium-btn" onclick="searchJamendo()">Search</button>
+              </div>
+              <div id="jamendo-results" class="jamendo-results-container">
+                <div class="empty-state">Search to find tracks.</div>
+              </div>
+              <div id="selected-track-ui" class="selected-track-panel" style="display: none;">
+                <div class="selected-track-header">
+                  <div class="selected-track-title">Selected Track: <span id="selected-track-name"></span></div>
+                  <div class="track-badge">Ready</div>
+                </div>
+                <audio id="jamendo-audio" class="premium-audio" controls></audio>
+                <div class="form-row">
+                  <div class="slider-group" style="flex: 1;">
+                    <label>Crop Start (sec) <span id="music-start-val">0</span></label>
+                    <input type="range" id="music-start-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+                  </div>
+                  <div class="slider-group" style="flex: 1;">
+                    <label>Crop End (sec) <span id="music-end-val">0</span></label>
+                    <input type="range" id="music-end-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          <div></div>
+          <div class="wizard-nav">
+            <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
+            <button class="wizard-btn wizard-btn-next" onclick="wizardNext()">Next: Finalize →</button>
+          </div>
         </div>
 
-        <div id="manual-music-section" class="premium-glass-panel" style="display:none;">
-          <label class="premium-label">Jamendo Music Search</label>
-          <div class="search-container">
-            <div class="search-input-wrapper">
-              <span class="search-icon">🔍</span>
-              <input type="text" id="jamendo-search" class="premium-input" placeholder="Search keywords, genres..." onkeypress="if(event.key === 'Enter') searchJamendo()">
-            </div>
-            <button class="btn btn-primary premium-btn" onclick="searchJamendo()">Search</button>
-          </div>
-          <div id="jamendo-results" class="jamendo-results-container">
-            <div class="empty-state">Search to find tracks.</div>
-          </div>
-          <div id="selected-track-ui" class="selected-track-panel" style="display: none;">
-            <div class="selected-track-header">
-              <div class="selected-track-title">Selected Track: <span id="selected-track-name"></span></div>
-              <div class="track-badge">Ready</div>
-            </div>
-            <audio id="jamendo-audio" class="premium-audio" controls></audio>
+        <!-- Step 5: Advanced & Generate -->
+        <div class="wizard-panel" data-panel="5">
+          <div class="card">
+            <div class="card-title">⚙️ Advanced Options</div>
             <div class="form-row">
-              <div class="slider-group" style="flex: 1;">
-                <label>Crop Start (sec) <span id="music-start-val">0</span></label>
-                <input type="range" id="music-start-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+              <div class="form-group">
+                <label>Language</label>
+                <select onchange="state.language=this.value">
+                  <option value="english">English</option>
+                  <option value="hindi">Hindi</option>
+                  <option value="hinglish">Hinglish</option>
+                </select>
               </div>
-              <div class="slider-group" style="flex: 1;">
-                <label>Crop End (sec) <span id="music-end-val">0</span></label>
-                <input type="range" id="music-end-slider" min="0" max="100" value="0" oninput="updateMusicCrop(this.id)">
+              <div class="form-group">
+                <label>Upload Schedule</label>
+                <select onchange="state.upload_schedule=this.value">
+                  <option value="immediate">Immediately</option>
+                  <option value="19:00">7:00 PM</option>
+                  <option value="20:00">8:00 PM</option>
+                  <option value="21:00">9:00 PM</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Caption Style</label>
+                <select onchange="state.caption_style=this.value">
+                  <option value="bold_white">Bold White (Recommended)</option>
+                  <option value="subtitle">Standard Subtitle</option>
+                  <option value="none">No Captions</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label style="display:flex;align-items:center;gap:8px;margin-top:28px;cursor:pointer;">
+                  <input type="checkbox" id="auto-upload-chk" onchange="state.auto_upload=this.checked">
+                  Auto-Upload to YouTube
+                </label>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px">If unchecked, you can review the video before uploading.</div>
               </div>
             </div>
           </div>
-        </div>
 
-        <label class="premium-label">Script Tone</label>
-        <div class="tone-chips">
-          <button class="tone-chip active" onclick="setTone('dramatic')">🎭 Dramatic</button>
-          <button class="tone-chip" onclick="setTone('educational')">📚 Educational</button>
-          <button class="tone-chip" onclick="setTone('conversational')">💬 Conversational</button>
-          <button class="tone-chip" onclick="setTone('suspenseful')">😰 Suspenseful</button>
-          <button class="tone-chip" onclick="setTone('motivational')">💪 Motivational</button>
-          <button class="tone-chip" onclick="setTone('humorous')">😄 Humorous</button>
-        </div>
-      </div>
-
-      <!-- Advanced -->
-      <div class="card">
-        <div class="card-title">⚙️ Advanced Options</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Language</label>
-            <select onchange="state.language=this.value">
-              <option value="english">English</option>
-              <option value="hindi">Hindi</option>
-              <option value="hinglish">Hinglish</option>
-            </select>
+          <!-- Summary Card -->
+          <div class="card" id="wizard-summary">
+            <div class="card-title">📋 Summary</div>
+            <div id="wizard-summary-content"></div>
           </div>
-          <div class="form-group">
-            <label>Upload Schedule</label>
-            <select onchange="state.upload_schedule=this.value">
-              <option value="immediate">Immediately</option>
-              <option value="19:00">7:00 PM</option>
-              <option value="20:00">8:00 PM</option>
-              <option value="21:00">9:00 PM</option>
-            </select>
+
+          <div class="wizard-nav">
+            <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
+            <button class="btn-generate" id="btn-generate" onclick="createJob()">🚀 Generate Video</button>
           </div>
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Caption Style</label>
-            <select onchange="state.caption_style=this.value">
-              <option value="bold_white">Bold White (Recommended)</option>
-              <option value="subtitle">Standard Subtitle</option>
-              <option value="none">No Captions</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label style="display:flex;align-items:center;gap:8px;margin-top:28px;cursor:pointer;">
-              <input type="checkbox" id="auto-upload-chk" onchange="state.auto_upload=this.checked">
-              Auto-Upload to YouTube
-            </label>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:4px">If unchecked, you can review the video before uploading.</div>
-          </div>
-        </div>
-      </div>
 
-      <!-- Generate -->
-      <button class="btn-generate" id="btn-generate" onclick="createJob()">🚀 Generate Video</button>
+      </div><!-- /wizard-body -->
 
-      <!-- Progress Panel -->
+      <!-- Progress Panel (outside wizard) -->
       <div class="progress-panel" id="progress-panel">
         <div class="card" style="border-color:var(--accent);margin-top:20px">
           <div class="card-title">⚡ Pipeline Progress</div>
@@ -252,11 +356,30 @@
             <li class="pipeline-step waiting" data-stage="6"><div class="step-icon">6</div><div class="step-info"><div class="step-name">Video Render</div><div class="step-msg">Waiting...</div></div></li>
             <li class="pipeline-step waiting" data-stage="7"><div class="step-icon">7</div><div class="step-info"><div class="step-name">Upload</div><div class="step-msg">Waiting...</div></div></li>
           </ul>
-          
+
           <div id="approval-panel" style="display:none; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--glass-border);">
             <div style="font-weight:600;margin-bottom:12px;color:var(--accent)">👀 Video Ready for Review</div>
             <video id="preview-video" controls style="max-width: 100%; max-height: 400px; display: block; margin: 0 auto 16px auto; border-radius: 8px; background: #000;"></video>
-            <div style="display:flex; gap:12px">
+
+            <!-- Trim Controls -->
+            <div id="trim-controls" class="trim-controls">
+              <div class="trim-header">
+                <span class="trim-title">✂️ Trim End Point</span>
+                <span class="trim-time" id="trim-time-display">--:--</span>
+              </div>
+              <div class="trim-slider-row">
+                <span class="trim-label">0:00</span>
+                <input type="range" id="trim-slider" class="trim-slider" min="0" max="100" step="0.1" value="100" oninput="onTrimSliderChange(this.value)">
+                <span class="trim-label" id="trim-max-label">--:--</span>
+              </div>
+              <div class="trim-actions">
+                <button class="btn trim-preview-btn" onclick="previewTrimPoint()">▶ Preview at trim point</button>
+                <button class="btn trim-apply-btn" onclick="applyTrim()" id="btn-apply-trim">✂️ Apply Trim</button>
+              </div>
+              <div class="trim-hint">Drag the slider to set where the video should end. Click "Apply Trim" to cut.</div>
+            </div>
+
+            <div style="display:flex; gap:12px; margin-top: 16px;">
               <button class="btn-generate" style="flex:1" onclick="approveJob()">✅ Approve & Upload</button>
               <button class="toggle-btn" style="flex:1" onclick="rejectJob()">❌ Reject (Discard)</button>
             </div>

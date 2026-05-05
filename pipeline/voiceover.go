@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +18,48 @@ import (
 	"yt-automation-studio/config"
 	"yt-automation-studio/models"
 )
+
+// reconcileScriptDurations updates job.Script.TotalDuration based on the
+// ACTUAL voice durations (probed from the generated audio files) plus the
+// per-segment tail pad. The LLM's duration estimates are inaccurate because
+// TTS engines speak at a rate different from the assumed 130 wpm, which
+// caused unnatural multi-second silences between segments. After this call,
+// downstream stages (music fetch, video render) see a duration that matches
+// what the viewer will actually experience.
+func reconcileScriptDurations(job *models.JobContext) {
+	if job.Script == nil {
+		return
+	}
+	totalSec := 0.0
+	for _, seg := range job.Script.Segments {
+		voicePath := job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)]
+		if voicePath == "" {
+			totalSec += float64(seg.DurationSec)
+			continue
+		}
+		dur := getMediaDuration(voicePath)
+		if dur <= 0 {
+			dur = float64(seg.DurationSec)
+		}
+		totalSec += dur + segmentTailPad(seg.Type)
+	}
+	if totalSec <= 0 {
+		return
+	}
+	newTotal := int(math.Ceil(totalSec))
+	if job.Script.TotalDuration != newTotal {
+		log.Printf("📐 Job %s — reconciled total duration: %ds (was estimate %ds)",
+			job.JobID[:8], newTotal, job.Script.TotalDuration)
+	}
+	job.Script.TotalDuration = newTotal
+
+	// Persist the updated script.json so the UI and downstream tooling see
+	// the corrected duration rather than the LLM's estimate.
+	jobDir := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", job.JobID))
+	if scriptJSON, err := json.MarshalIndent(job.Script, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(jobDir, "script.json"), scriptJSON, 0644)
+	}
+}
 
 // ElevenLabs voice ID mapping
 var voiceIDs = map[string]string{
@@ -87,6 +130,45 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 
 			job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = voicePath
 		}
+		reconcileScriptDurations(job)
+		return nil
+	}
+
+	// Google Cloud TTS mode
+	if payload.VoiceoverMode == "gcp_tts" {
+		gcpKey := config.App.GoogleCloudTTSAPIKey
+		if gcpKey == "" {
+			return fmt.Errorf("GOOGLE_CLOUD_TTS_API_KEY not configured — set it in .env or switch to another voiceover mode")
+		}
+
+		for i, seg := range segments {
+			pct := int(float64(i+1) / float64(len(segments)) * 90)
+			progress(models.ProgressEvent{
+				JobID: job.JobID, Stage: 3, StageName: "Voiceover",
+				ProgressPct: pct,
+				Message:     fmt.Sprintf("Google TTS: generating voice for segment %d of %d...", i+1, len(segments)),
+				Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			})
+
+			outputPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_voice.mp3", seg.SegmentID))
+
+			var lastErr error
+			for attempt := 1; attempt <= 3; attempt++ {
+				if err := SynthesizeGCPTTS(seg.Text, payload.GCPVoiceName, payload.GCPLanguageCode, gcpKey, outputPath); err != nil {
+					lastErr = err
+					time.Sleep(time.Duration(attempt*10) * time.Second)
+					continue
+				}
+				lastErr = nil
+				break
+			}
+			if lastErr != nil {
+				return fmt.Errorf("GCP TTS for segment %d after 3 retries: %w", seg.SegmentID, lastErr)
+			}
+
+			job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = outputPath
+		}
+		reconcileScriptDurations(job)
 		return nil
 	}
 
@@ -130,6 +212,7 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 		job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = outputPath
 	}
 
+	reconcileScriptDurations(job)
 	return nil
 }
 

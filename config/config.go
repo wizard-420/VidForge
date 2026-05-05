@@ -12,14 +12,15 @@ import (
 // Config holds all application configuration loaded from .env
 type Config struct {
 	// API Keys
-	GroqAPIKey       string
-	ElevenLabsAPIKey string
-	PexelsAPIKey     string
-	PixabayAPIKey    string
-	OpenAIAPIKey     string
-	TogetherAPIKey   string
-	HFAPIKey         string
-	JamendoClientID  string
+	GroqAPIKey           string
+	ElevenLabsAPIKey     string
+	GoogleCloudTTSAPIKey string
+	PexelsAPIKey         string
+	PixabayAPIKey        string
+	OpenAIAPIKey         string
+	TogetherAPIKey       string
+	HFAPIKey             string
+	JamendoClientID      string
 
 	// YouTube OAuth
 	YouTubeClientSecretFile string
@@ -43,9 +44,10 @@ func Load() {
 	_ = godotenv.Load()
 
 	App = &Config{
-		GroqAPIKey:       getEnv("GROQ_API_KEY", ""),
-		ElevenLabsAPIKey: getEnv("ELEVENLABS_API_KEY", ""),
-		PexelsAPIKey:     getEnv("PEXELS_API_KEY", ""),
+		GroqAPIKey:           getEnv("GROQ_API_KEY", ""),
+		ElevenLabsAPIKey:     getEnv("ELEVENLABS_API_KEY", ""),
+		GoogleCloudTTSAPIKey: getEnv("GOOGLE_CLOUD_TTS_API_KEY", ""),
+		PexelsAPIKey:         getEnv("PEXELS_API_KEY", ""),
 		PixabayAPIKey:    getEnv("PIXABAY_API_KEY", ""),
 		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
 		TogetherAPIKey:   getEnv("TOGETHER_API_KEY", ""),
@@ -75,32 +77,34 @@ func Load() {
 // GetMaskedSettings returns config with API keys masked for the frontend
 func (c *Config) GetMaskedSettings() map[string]interface{} {
 	return map[string]interface{}{
-		"groq_api_key":       maskKey(c.GroqAPIKey),
-		"elevenlabs_api_key": maskKey(c.ElevenLabsAPIKey),
-		"pexels_api_key":     maskKey(c.PexelsAPIKey),
-		"pixabay_api_key":    maskKey(c.PixabayAPIKey),
-		"openai_api_key":     maskKey(c.OpenAIAPIKey),
-		"together_api_key":   maskKey(c.TogetherAPIKey),
-		"hf_api_key":         maskKey(c.HFAPIKey),
-		"workspace_dir":      c.WorkspaceDir,
-		"export_dir":         c.ExportDir,
-		"log_level":          c.LogLevel,
-		"max_concurrent":     c.MaxConcurrent,
-		"server_port":        c.ServerPort,
-		"cleanup_days":       c.CleanupDays,
+		"groq_api_key":           maskKey(c.GroqAPIKey),
+		"elevenlabs_api_key":     maskKey(c.ElevenLabsAPIKey),
+		"google_cloud_tts_key":   maskKey(c.GoogleCloudTTSAPIKey),
+		"pexels_api_key":         maskKey(c.PexelsAPIKey),
+		"pixabay_api_key":        maskKey(c.PixabayAPIKey),
+		"openai_api_key":         maskKey(c.OpenAIAPIKey),
+		"together_api_key":       maskKey(c.TogetherAPIKey),
+		"hf_api_key":             maskKey(c.HFAPIKey),
+		"workspace_dir":          c.WorkspaceDir,
+		"export_dir":             c.ExportDir,
+		"log_level":              c.LogLevel,
+		"max_concurrent":         c.MaxConcurrent,
+		"server_port":            c.ServerPort,
+		"cleanup_days":           c.CleanupDays,
 	}
 }
 
 // HasRequiredKeys checks if minimum API keys are configured
 func (c *Config) HasRequiredKeys() map[string]bool {
 	return map[string]bool{
-		"groq":        c.GroqAPIKey != "",
-		"elevenlabs": c.ElevenLabsAPIKey != "",
-		"pexels":     c.PexelsAPIKey != "",
-		"pixabay":    c.PixabayAPIKey != "",
-		"openai":     c.OpenAIAPIKey != "",
-		"together":   c.TogetherAPIKey != "",
-		"hf":         c.HFAPIKey != "",
+		"groq":           c.GroqAPIKey != "",
+		"elevenlabs":     c.ElevenLabsAPIKey != "",
+		"google_tts":     c.GoogleCloudTTSAPIKey != "",
+		"pexels":         c.PexelsAPIKey != "",
+		"pixabay":        c.PixabayAPIKey != "",
+		"openai":         c.OpenAIAPIKey != "",
+		"together":       c.TogetherAPIKey != "",
+		"hf":             c.HFAPIKey != "",
 	}
 }
 

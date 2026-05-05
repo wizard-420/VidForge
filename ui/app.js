@@ -20,13 +20,17 @@ const state = {
   upload_schedule: 'immediate',
   caption_style: 'bold_white',
   auto_upload: false,
-  clip_count: 6,
+  clip_count: 0,
   image_count: 0,
+  seconds_per_visual: 6,
+  ai_image_percent: 0,
   music_url: '',
   music_start: 0,
   music_end: 0,
   pre_generated_script: null,
-  manual_audio_base64: {}
+  manual_audio_base64: {},
+  gcp_voice_name: '',
+  gcp_language_code: ''
 };
 
 // Global variables for recording
@@ -35,6 +39,126 @@ let audioChunks = {};
 
 let currentJobId = null;
 let ws = null;
+
+// ==========================================
+// WIZARD NAVIGATION
+// ==========================================
+let currentWizardStep = 0;
+const WIZARD_TOTAL_STEPS = 6;
+
+const wizardStepLabels = ['Content', 'Format', 'Script', 'Visuals', 'Music', 'Finalize'];
+const wizardNextLabels = ['Format', 'Script', 'Visuals', 'Music', 'Finalize'];
+
+function wizardGoTo(step) {
+  if (step < 0 || step >= WIZARD_TOTAL_STEPS) return;
+
+  // Validate before going forward
+  if (step > currentWizardStep) {
+    const err = validateWizardStep(currentWizardStep);
+    if (err) { alert(err); return; }
+  }
+
+  currentWizardStep = step;
+
+  // Update panels
+  document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
+  const target = document.querySelector(`.wizard-panel[data-panel="${step}"]`);
+  if (target) target.classList.add('active');
+
+  // Update stepper
+  document.querySelectorAll('.wizard-step').forEach(s => {
+    const idx = +s.dataset.wstep;
+    s.classList.remove('active', 'done');
+    if (idx < step) s.classList.add('done');
+    else if (idx === step) s.classList.add('active');
+  });
+
+  document.querySelectorAll('.wizard-step-line').forEach((line, i) => {
+    line.classList.toggle('done', i < step);
+  });
+
+  // On the final step, render the summary
+  if (step === WIZARD_TOTAL_STEPS - 1) renderWizardSummary();
+
+  // Scroll to top of main
+  document.querySelector('.main').scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function wizardNext() { wizardGoTo(currentWizardStep + 1); }
+function wizardBack() { wizardGoTo(currentWizardStep - 1); }
+
+function wizardJumpTo(step) {
+  if (step <= currentWizardStep || document.querySelector(`.wizard-step[data-wstep="${step}"]`).classList.contains('done')) {
+    // Going backward or to a completed step — skip validation
+    currentWizardStep = step;
+    document.querySelectorAll('.wizard-panel').forEach(p => p.classList.remove('active'));
+    const target = document.querySelector(`.wizard-panel[data-panel="${step}"]`);
+    if (target) target.classList.add('active');
+
+    document.querySelectorAll('.wizard-step').forEach(s => {
+      const idx = +s.dataset.wstep;
+      s.classList.remove('active', 'done');
+      if (idx < step) s.classList.add('done');
+      else if (idx === step) s.classList.add('active');
+    });
+    document.querySelectorAll('.wizard-step-line').forEach((line, i) => {
+      line.classList.toggle('done', i < step);
+    });
+
+    if (step === WIZARD_TOTAL_STEPS - 1) renderWizardSummary();
+    document.querySelector('.main').scrollTo({ top: 0, behavior: 'smooth' });
+  }
+}
+
+function validateWizardStep(step) {
+  switch (step) {
+    case 0:
+      if (!state.raw_input.trim()) return 'Please enter a topic, category, or event description.';
+      break;
+    case 2:
+      if (!state.pre_generated_script) return 'Please generate and approve the script before proceeding.';
+      if (state.voiceover_mode === 'manual') {
+        const segs = state.pre_generated_script.segments;
+        for (let i = 0; i < segs.length; i++) {
+          if (!state.manual_audio_base64[segs[i].segment_id]) {
+            return 'Please record audio for all segments. Missing: Segment ' + segs[i].segment_id + '.';
+          }
+        }
+      }
+      if (state.voiceover_mode === 'gcp_tts') {
+        if (!state.gcp_language_code) return 'Please select a language for Google TTS.';
+        if (!state.gcp_voice_name) return 'Please select a voice for Google TTS.';
+      }
+      break;
+    case 4:
+      if (state.music_mode === 'manual' && !state.music_url) {
+        return 'Please search and select a music track, or switch to Auto Music / No Music.';
+      }
+      break;
+  }
+  return null;
+}
+
+function renderWizardSummary() {
+  const el = document.getElementById('wizard-summary-content');
+  if (!el) return;
+  const items = [
+    ['Input', state.raw_input ? (state.raw_input.length > 60 ? state.raw_input.substring(0, 60) + '...' : state.raw_input) : '—'],
+    ['Type', state.input_type],
+    ['Format', state.format + (state.format !== 'short' ? ' (' + state.duration_min + ' min)' : '')],
+    ['Voice', state.voiceover_mode === 'ai' ? 'AI — ' + state.voice_id : state.voiceover_mode === 'gcp_tts' ? 'Google TTS — ' + state.gcp_voice_name : 'Manual recording'],
+    ['Script', state.pre_generated_script ? 'Approved (' + state.pre_generated_script.segments.length + ' segments)' : 'Will be generated'],
+    ['Visuals', `${state.video_style} • 1 / ${state.seconds_per_visual}s` + (state.video_mode === 'manual' ? ' (manual)' : '')],
+    ['Music', state.music_mode + (state.music_mode === 'manual' && state.music_url ? ' (track selected)' : '')],
+    ['Tone', state.script_tone],
+    ['Language', state.language],
+    ['Captions', state.caption_style],
+    ['Upload', state.auto_upload ? 'Auto-upload' : 'Manual approval'],
+  ];
+  el.innerHTML = items.map(([k, v]) =>
+    `<div class="summary-row"><span class="summary-label">${k}</span><span class="summary-value">${v}</span></div>`
+  ).join('');
+}
 
 // ---- Hint chips per input type ----
 const hints = {
@@ -81,16 +205,24 @@ function setFormat(fmt) {
     c.classList.toggle('active', ['long', 'short', 'both'][i] === fmt);
   });
   document.getElementById('duration-slider').style.display = fmt === 'short' ? 'none' : '';
+  updateVisualsPreview();
 }
 
 // ---- Voice ----
 function setVoiceMode(mode) {
   state.voiceover_mode = mode;
-  const btns = document.querySelector('#page-create .card:nth-child(4) .toggle-group').children;
+  const panel = document.querySelector('.wizard-panel[data-panel="2"]');
+  const btns = panel.querySelector('.toggle-group').children;
   btns[0].classList.toggle('active', mode === 'ai');
-  btns[1].classList.toggle('active', mode === 'manual');
+  btns[1].classList.toggle('active', mode === 'gcp_tts');
+  btns[2].classList.toggle('active', mode === 'manual');
   document.getElementById('voice-grid').style.display = mode === 'ai' ? 'grid' : 'none';
-  document.getElementById('manual-record-section').style.display = mode === 'manual' ? 'block' : 'none';
+  document.getElementById('gcp-tts-panel').style.display = mode === 'gcp_tts' ? 'block' : 'none';
+
+  if (mode === 'gcp_tts' && !state.gcp_language_code) {
+    state.gcp_language_code = 'en-US';
+    loadGCPVoices('en-US');
+  }
 }
 
 function setVoice(id) {
@@ -100,59 +232,234 @@ function setVoice(id) {
   });
 }
 
+// ---- Google Cloud TTS ----
+let gcpVoicesCache = {};
+
+async function loadGCPVoices(languageCode) {
+  state.gcp_language_code = languageCode;
+  state.gcp_voice_name = '';
+
+  const voiceSelect = document.getElementById('gcp-voice-select');
+  voiceSelect.innerHTML = '<option value="">Loading voices...</option>';
+  document.getElementById('gcp-voice-info').style.display = 'none';
+
+  if (gcpVoicesCache[languageCode]) {
+    renderGCPVoiceOptions(gcpVoicesCache[languageCode]);
+    return;
+  }
+
+  try {
+    const resp = await fetch(API + '/api/gcp-tts/voices?language=' + encodeURIComponent(languageCode));
+    if (!resp.ok) {
+      const err = await resp.json();
+      voiceSelect.innerHTML = '<option value="">Error: ' + (err.error || 'unavailable') + '</option>';
+      return;
+    }
+    const data = await resp.json();
+    gcpVoicesCache[languageCode] = data.voices || [];
+    renderGCPVoiceOptions(gcpVoicesCache[languageCode]);
+  } catch (e) {
+    voiceSelect.innerHTML = '<option value="">Failed to load voices</option>';
+  }
+}
+
+function renderGCPVoiceOptions(voices) {
+  const voiceSelect = document.getElementById('gcp-voice-select');
+  if (!voices || voices.length === 0) {
+    voiceSelect.innerHTML = '<option value="">No voices available</option>';
+    return;
+  }
+
+  const genderIcon = { MALE: '♂', FEMALE: '♀', NEUTRAL: '⚬' };
+  const sorted = [...voices].sort((a, b) => a.name.localeCompare(b.name));
+
+  voiceSelect.innerHTML = '<option value="">— Select a voice —</option>' +
+    sorted.map(v => {
+      const icon = genderIcon[v.ssmlGender] || '';
+      const type = v.name.includes('Neural2') ? 'Neural2' :
+                   v.name.includes('WaveNet') ? 'WaveNet' :
+                   v.name.includes('Studio') ? 'Studio' :
+                   v.name.includes('Chirp') ? 'Chirp' : 'Standard';
+      return '<option value="' + v.name + '">' + icon + ' ' + v.name + ' (' + type + ')</option>';
+    }).join('');
+}
+
+function setGCPVoice(voiceName) {
+  state.gcp_voice_name = voiceName;
+  const infoEl = document.getElementById('gcp-voice-info');
+
+  if (!voiceName) {
+    infoEl.style.display = 'none';
+    return;
+  }
+
+  const voices = gcpVoicesCache[state.gcp_language_code] || [];
+  const voice = voices.find(v => v.name === voiceName);
+  if (voice) {
+    const type = voice.name.includes('Neural2') ? 'Neural2 (High quality)' :
+                 voice.name.includes('WaveNet') ? 'WaveNet (Natural)' :
+                 voice.name.includes('Studio') ? 'Studio (Premium)' :
+                 voice.name.includes('Chirp') ? 'Chirp HD' : 'Standard';
+    infoEl.innerHTML = '<span class="gcp-voice-badge">' + voice.ssmlGender + '</span> ' +
+      '<span class="gcp-voice-badge">' + type + '</span> ' +
+      '<span class="gcp-voice-badge">' + voice.naturalSampleRateHertz + ' Hz</span>';
+    infoEl.style.display = 'flex';
+  }
+
+  renderGCPTTSPreview();
+}
+
+function renderGCPTTSPreview() {
+  const container = document.getElementById('gcp-tts-preview-container');
+  if (!state.pre_generated_script || !state.gcp_voice_name) {
+    container.style.display = 'none';
+    return;
+  }
+
+  const segments = state.pre_generated_script.segments;
+  container.style.display = 'block';
+  container.innerHTML = '<div class="gcp-preview-title">Preview Segments</div>' +
+    segments.map(seg => {
+      const truncText = seg.text.length > 80 ? seg.text.substring(0, 80) + '...' : seg.text;
+      return '<div class="gcp-preview-row">' +
+        '<span class="gcp-seg-label">Seg ' + seg.segment_id + '</span>' +
+        '<span class="gcp-seg-text">' + truncText + '</span>' +
+        '<button class="btn gcp-play-btn" onclick="previewGCPTTS(' + seg.segment_id + ')" id="gcp-play-' + seg.segment_id + '">▶ Play</button>' +
+        '</div>';
+    }).join('');
+}
+
+async function previewGCPTTS(segmentId) {
+  if (!state.gcp_voice_name || !state.gcp_language_code) {
+    alert('Please select a language and voice first.');
+    return;
+  }
+
+  const segment = state.pre_generated_script.segments.find(s => s.segment_id === segmentId);
+  if (!segment) return;
+
+  const btn = document.getElementById('gcp-play-' + segmentId);
+  const originalText = btn.textContent;
+  btn.textContent = '⏳...';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch(API + '/api/gcp-tts/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: segment.text,
+        voice_name: state.gcp_voice_name,
+        language_code: state.gcp_language_code
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      alert('TTS Error: ' + (err.error || 'Failed to synthesize'));
+      return;
+    }
+
+    const data = await resp.json();
+    const audio = new Audio('data:audio/mpeg;base64,' + data.audio_base64);
+    audio.play();
+    btn.textContent = '🔊 Playing';
+    audio.onended = () => { btn.textContent = originalText; btn.disabled = false; };
+  } catch (e) {
+    alert('Preview failed: ' + e.message);
+  } finally {
+    if (btn.textContent === '⏳...') {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
+  }
+}
+
 // ---- Video ----
 function setVideoMode(mode) {
   state.video_mode = mode;
-  const card = document.querySelector('#page-create .card:nth-child(5)');
-  const btns = card.querySelector('.toggle-group').children;
+  const panel = document.querySelector('.wizard-panel[data-panel="3"]');
+  const btns = panel.querySelector('.toggle-group').children;
   btns[0].classList.toggle('active', mode === 'auto');
   btns[1].classList.toggle('active', mode === 'manual');
   document.getElementById('style-chips').style.display = mode === 'auto' ? '' : 'none';
   document.getElementById('media-counts').style.display = mode === 'auto' ? '' : 'none';
 }
 
-function setVideoStyle(style) {
-  state.video_style = style;
-  document.querySelectorAll('#style-chips .hint').forEach(c => {
-    c.classList.toggle('active', c.onclick.toString().includes("'" + style + "'"));
+// ---- Visual pacing & AI mix ----
+const PACING_PRESETS = {
+  cinematic: 10,
+  balanced: 6,
+  energetic: 4,
+};
+
+function setPacing(preset) {
+  document.querySelectorAll('#pacing-chips .hint').forEach(c => {
+    c.classList.toggle('active', c.dataset.pacing === preset);
   });
-  // Show/hide clip and image sliders based on style
-  const clipGroup = document.getElementById('clip-count-group');
-  const imgGroup = document.getElementById('image-count-group');
-  if (style === 'stock') {
-    clipGroup.style.display = '';
-    imgGroup.style.display = 'none';
-    state.image_count = 0;
-  } else if (style === 'ai_images') {
-    clipGroup.style.display = 'none';
-    imgGroup.style.display = '';
-    state.clip_count = 0;
-    // Set default image count
-    const imgSlider = imgGroup.querySelector('input');
-    imgSlider.value = 6;
-    state.image_count = 6;
-    document.getElementById('img-val').textContent = '6';
-  } else { // mixed
-    clipGroup.style.display = '';
-    imgGroup.style.display = '';
-    // Set defaults for mixed
-    const clipSlider = clipGroup.querySelector('input');
-    const imgSlider = imgGroup.querySelector('input');
-    clipSlider.value = 4; state.clip_count = 4;
-    imgSlider.value = 2; state.image_count = 2;
-    document.getElementById('clip-val').textContent = '4';
-    document.getElementById('img-val').textContent = '2';
+  const customGroup = document.getElementById('pacing-custom-group');
+  if (preset === 'custom') {
+    customGroup.style.display = '';
+    onPacingSliderChange(state.seconds_per_visual || 6);
+  } else {
+    customGroup.style.display = 'none';
+    state.seconds_per_visual = PACING_PRESETS[preset];
+    document.getElementById('pacing-slider').value = state.seconds_per_visual;
+    document.getElementById('pacing-val').textContent = state.seconds_per_visual;
   }
+  // Derive video_style from AI mix so backend defaults still make sense.
+  syncVideoStyleFromMix();
+  updateVisualsPreview();
+}
+
+function onPacingSliderChange(value) {
+  state.seconds_per_visual = value;
+  document.getElementById('pacing-val').textContent = value;
+  updateVisualsPreview();
+}
+
+function onAIMixSliderChange(value) {
+  state.ai_image_percent = value;
+  document.getElementById('ai-mix-val').textContent = value;
+  document.getElementById('stock-mix-val').textContent = 100 - value;
+  syncVideoStyleFromMix();
+  updateVisualsPreview();
+}
+
+function syncVideoStyleFromMix() {
+  if (state.ai_image_percent >= 90) state.video_style = 'ai_images';
+  else if (state.ai_image_percent <= 10) state.video_style = 'stock';
+  else state.video_style = 'mixed';
+}
+
+function updateVisualsPreview() {
+  const el = document.getElementById('visuals-preview');
+  if (!el) return;
+  const isShort = state.format === 'short';
+  const estDurationSec = isShort ? 50 : (state.duration_min || 8) * 60;
+  const sPerVisual = state.seconds_per_visual || 6;
+  let total = Math.max(3, Math.ceil(estDurationSec / sPerVisual));
+  const aiCount = Math.round(total * state.ai_image_percent / 100);
+  const clipCount = total - aiCount;
+
+  let mixSuffix = '';
+  if (state.ai_image_percent === 0) mixSuffix = ` (${clipCount} stock clips)`;
+  else if (state.ai_image_percent === 100) mixSuffix = ` (${aiCount} AI images)`;
+  else mixSuffix = ` (${clipCount} clips + ${aiCount} AI images)`;
+
+  const mins = isShort ? '~50s' : `${state.duration_min || 8}-min`;
+  el.textContent = `≈ ${total} visuals across your ${mins} video — one new shot every ${sPerVisual} seconds.${mixSuffix}`;
 }
 
 // ---- Music ----
 function setMusicMode(mode) {
   state.music_mode = mode;
-  const card = document.querySelector('#page-create .card:nth-child(6)');
-  const btns = card.querySelector('.toggle-group').children;
+  const panel = document.querySelector('.wizard-panel[data-panel="4"]');
+  const btns = panel.querySelector('.toggle-group').children;
   btns[0].classList.toggle('active', mode === 'auto');
   btns[1].classList.toggle('active', mode === 'manual');
   btns[2].classList.toggle('active', mode === 'skip');
+  document.getElementById('auto-music-genre').style.display = mode === 'auto' ? 'block' : 'none';
   document.getElementById('manual-music-section').style.display = mode === 'manual' ? 'block' : 'none';
 }
 
@@ -233,11 +540,24 @@ function updateMusicCrop(changedId) {
 }
 
 // ---- Tone ----
+const toneToMusicDesc = {
+  dramatic:       'cinematic dramatic epic',
+  suspenseful:    'suspense dark mysterious thriller',
+  educational:    'calm ambient relaxing background',
+  conversational: 'acoustic light happy positive',
+  motivational:   'uplifting motivational energetic',
+  humorous:       'fun playful comedy upbeat',
+};
+
 function setTone(tone) {
   state.script_tone = tone;
   document.querySelectorAll('.tone-chip').forEach(c => {
     c.classList.toggle('active', c.onclick.toString().includes("'" + tone + "'"));
   });
+  const descEl = document.getElementById('auto-music-desc');
+  if (descEl) {
+    descEl.innerHTML = 'Auto music will match: <strong>' + (toneToMusicDesc[tone] || tone) + '</strong>';
+  }
 }
 
 // ---- Create Job ----
@@ -260,6 +580,13 @@ async function createJob() {
         alert('Missing recording for Segment ' + segs[i].segment_id + '. Please record all segments.');
         return;
       }
+    }
+  }
+
+  if (state.voiceover_mode === 'gcp_tts') {
+    if (!state.gcp_voice_name || !state.gcp_language_code) {
+      alert('Please select a language and voice for Google Cloud TTS.');
+      return;
     }
   }
 
@@ -382,6 +709,108 @@ async function rejectJob() {
     alert('Failed to reject job: ' + err);
   }
 }
+
+// ---- Trim Controls ----
+let videoDuration = 0;
+let trimEndTime = 0;
+
+function initTrimControls() {
+  const video = document.getElementById('preview-video');
+  video.addEventListener('loadedmetadata', function() {
+    videoDuration = video.duration;
+    trimEndTime = videoDuration;
+    const slider = document.getElementById('trim-slider');
+    slider.max = videoDuration;
+    slider.value = videoDuration;
+    slider.step = 0.1;
+    document.getElementById('trim-max-label').textContent = formatTime(videoDuration);
+    document.getElementById('trim-time-display').textContent = formatTime(videoDuration);
+  });
+}
+
+function onTrimSliderChange(value) {
+  trimEndTime = parseFloat(value);
+  document.getElementById('trim-time-display').textContent = formatTime(trimEndTime);
+}
+
+function previewTrimPoint() {
+  const video = document.getElementById('preview-video');
+  // Seek to 2 seconds before the trim point to give context
+  const seekTo = Math.max(0, trimEndTime - 2);
+  video.currentTime = seekTo;
+  video.play();
+
+  // Pause at the trim point
+  const checkPause = setInterval(() => {
+    if (video.currentTime >= trimEndTime) {
+      video.pause();
+      clearInterval(checkPause);
+    }
+  }, 50);
+}
+
+async function applyTrim() {
+  if (!currentJobId) return;
+  if (trimEndTime <= 0) {
+    alert('Please set a valid trim point.');
+    return;
+  }
+  if (trimEndTime >= videoDuration - 0.5) {
+    alert('Trim point is at or near the end of the video. No trimming needed.');
+    return;
+  }
+
+  const btn = document.getElementById('btn-apply-trim');
+  btn.textContent = '⏳ Trimming...';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch(`${API}/api/jobs/${currentJobId}/trim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ end_time: trimEndTime })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      alert('Trim failed: ' + (err.error || 'Unknown error'));
+      return;
+    }
+
+    // Reload the video to show the trimmed version
+    const video = document.getElementById('preview-video');
+    const src = video.src;
+    video.src = '';
+    video.src = src + '?t=' + Date.now();
+    video.load();
+
+    btn.textContent = '✅ Trimmed!';
+    setTimeout(() => {
+      btn.textContent = '✂️ Apply Trim';
+      btn.disabled = false;
+    }, 2000);
+  } catch (e) {
+    alert('Trim request failed: ' + e.message);
+  } finally {
+    if (btn.textContent === '⏳ Trimming...') {
+      btn.textContent = '✂️ Apply Trim';
+      btn.disabled = false;
+    }
+  }
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 10);
+  return m + ':' + String(s).padStart(2, '0') + '.' + ms;
+}
+
+// Initialize trim controls when the video loads
+document.addEventListener('DOMContentLoaded', initTrimControls);
+document.addEventListener('DOMContentLoaded', () => {
+  if (typeof updateVisualsPreview === 'function') updateVisualsPreview();
+});
 
 // ---- Jobs List ----
 async function loadJobs() {
@@ -647,17 +1076,21 @@ function approveScript() {
   if (state.voiceover_mode === 'manual') {
     renderRecordingControls();
   } else {
-    // AI Mode
     const container = document.getElementById('recording-script-container');
     container.style.display = 'block';
+    const modeLabel = state.voiceover_mode === 'gcp_tts' ? 'Google Cloud TTS' : 'ElevenLabs AI';
     container.innerHTML = `
       <div style="padding:16px; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.2); border-radius: 12px; text-align: center;">
         <div style="font-size:24px; margin-bottom:8px;">✅</div>
         <div style="font-weight:600; color:var(--success); margin-bottom:4px;">Script Approved!</div>
-        <div style="font-size:13px; color:var(--text-secondary);">The AI will generate voiceover using the selected voice. You can now proceed to generate the video.</div>
+        <div style="font-size:13px; color:var(--text-secondary);">${modeLabel} will generate voiceover using the selected voice. You can now proceed to generate the video.</div>
         <button class="btn btn-primary premium-btn" style="margin-top:12px; padding:6px 16px; font-size:12px;" onclick="resetScript()">Edit Script</button>
       </div>
     `;
+
+    if (state.voiceover_mode === 'gcp_tts') {
+      renderGCPTTSPreview();
+    }
   }
 }
 

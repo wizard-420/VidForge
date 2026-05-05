@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -39,9 +40,12 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/jobs/{id}/download", handleDownload)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", handleRetryJob)
 	mux.HandleFunc("POST /api/jobs/{id}/approve", handleApproveJob)
+	mux.HandleFunc("POST /api/jobs/{id}/trim", handleTrimJob)
 	mux.HandleFunc("GET /api/settings", handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", handleUpdateSettings)
 	mux.HandleFunc("GET /api/voices", handleGetVoices)
+	mux.HandleFunc("GET /api/gcp-tts/voices", handleGCPTTSVoices)
+	mux.HandleFunc("POST /api/gcp-tts/synthesize", handleGCPTTSSynthesize)
 	mux.HandleFunc("GET /api/music/jamendo/search", handleJamendoSearch)
 	mux.HandleFunc("POST /api/preview-script", handlePreviewScript)
 	mux.HandleFunc("POST /api/refine-script", handleRefineScript)
@@ -300,6 +304,81 @@ func handleApproveJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"message": "Job approved and queued for upload",
 		"job_id":  job.JobID,
+	})
+}
+
+// POST /api/jobs/{id}/trim — Trim the final video to a specified end time
+func handleTrimJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req struct {
+		EndTime float64 `json:"end_time"` // seconds
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
+		return
+	}
+
+	if req.EndTime <= 0 {
+		writeError(w, http.StatusBadRequest, "end_time must be greater than 0")
+		return
+	}
+
+	jobDir := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", id))
+	inputPath := filepath.Join(jobDir, "final_output.mp4")
+
+	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
+		writeError(w, http.StatusNotFound, "Video not found for this job")
+		return
+	}
+
+	// Log input file durations BEFORE trim to diagnose any issues
+	inV := pipeline.GetStreamDuration(inputPath, "v")
+	inA := pipeline.GetStreamDuration(inputPath, "a")
+	log.Printf("📊 Trim input: video=%.3fs, audio=%.3fs (diff=%.3fs)", inV, inA, inA-inV)
+
+	// Filter-based trim: produces exactly endStr seconds for both streams.
+	// -t alone causes audio to lose ~1.5s due to AAC encoder flush behavior;
+	// filters bypass this by feeding the encoder pre-trimmed frames.
+	// apad is added to ensure audio is at least endStr long even if input audio is short.
+	trimmedPath := filepath.Join(jobDir, "final_output_trimmed.mp4")
+	endStr := fmt.Sprintf("%.3f", req.EndTime)
+	filterComplex := fmt.Sprintf(
+		"[0:v]trim=duration=%s,setpts=PTS-STARTPTS[v];"+
+			"[0:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS[a]",
+		endStr, endStr, endStr,
+	)
+	cmd := exec.Command("ffmpeg",
+		"-i", inputPath,
+		"-filter_complex", filterComplex,
+		"-map", "[v]", "-map", "[a]",
+		"-c:v", "libx264", "-preset", "fast", "-crf", "21",
+		"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+		"-movflags", "+faststart",
+		"-y", trimmedPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("❌ Trim failed for job %s: %v — output: %s", id, err, string(output))
+		writeError(w, http.StatusInternalServerError, "Failed to trim video: "+err.Error())
+		return
+	}
+
+	// Log output file durations AFTER trim
+	outV := pipeline.GetStreamDuration(trimmedPath, "v")
+	outA := pipeline.GetStreamDuration(trimmedPath, "a")
+	log.Printf("📊 Trim output: video=%.3fs, audio=%.3fs (diff=%.3fs)", outV, outA, outA-outV)
+
+	// Replace original with trimmed version
+	if err := os.Rename(trimmedPath, inputPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to save trimmed video")
+		return
+	}
+
+	log.Printf("✂️ Trimmed job %s to %.3fs (requested) — actual: video=%.3fs audio=%.3fs", id, req.EndTime, outV, outA)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Video trimmed successfully",
+		"end_time": req.EndTime,
 	})
 }
 
@@ -581,4 +660,86 @@ func handleJamendoSearch(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"tracks": tracks})
+}
+
+// --- Google Cloud TTS Handlers ---
+
+var (
+	gcpVoiceCache      []pipeline.GCPVoice
+	gcpVoiceCacheLang  string
+	gcpVoiceCacheTime  time.Time
+	gcpVoiceCacheMu    sync.RWMutex
+)
+
+func handleGCPTTSVoices(w http.ResponseWriter, r *http.Request) {
+	apiKey := config.App.GoogleCloudTTSAPIKey
+	if apiKey == "" {
+		http.Error(w, `{"error":"GOOGLE_CLOUD_TTS_API_KEY not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	lang := r.URL.Query().Get("language")
+
+	// Check cache (1 hour TTL, per-language)
+	gcpVoiceCacheMu.RLock()
+	if gcpVoiceCache != nil && gcpVoiceCacheLang == lang && time.Since(gcpVoiceCacheTime) < time.Hour {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"voices": gcpVoiceCache})
+		gcpVoiceCacheMu.RUnlock()
+		return
+	}
+	gcpVoiceCacheMu.RUnlock()
+
+	voices, err := pipeline.ListGCPVoices(apiKey, lang)
+	if err != nil {
+		log.Printf("❌ GCP TTS voices error: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+
+	// Update cache
+	gcpVoiceCacheMu.Lock()
+	gcpVoiceCache = voices
+	gcpVoiceCacheLang = lang
+	gcpVoiceCacheTime = time.Now()
+	gcpVoiceCacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"voices": voices})
+}
+
+func handleGCPTTSSynthesize(w http.ResponseWriter, r *http.Request) {
+	apiKey := config.App.GoogleCloudTTSAPIKey
+	if apiKey == "" {
+		http.Error(w, `{"error":"GOOGLE_CLOUD_TTS_API_KEY not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Text         string `json:"text"`
+		VoiceName    string `json:"voice_name"`
+		LanguageCode string `json:"language_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Text == "" || req.VoiceName == "" || req.LanguageCode == "" {
+		http.Error(w, `{"error":"text, voice_name, and language_code are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	audioBytes, err := pipeline.SynthesizeGCPTTSToBytes(req.Text, req.VoiceName, req.LanguageCode, apiKey)
+	if err != nil {
+		log.Printf("❌ GCP TTS synthesize error: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"audio_base64": base64.StdEncoding.EncodeToString(audioBytes),
+		"content_type": "audio/mpeg",
+	})
 }
