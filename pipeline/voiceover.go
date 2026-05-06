@@ -83,6 +83,56 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 		return fmt.Errorf("create segments directory: %w", err)
 	}
 
+	// "Music Only" mode: no narration. We synthesize silent MP3s sized to the
+	// LLM-planned segment durations so the rest of the pipeline (segment sync,
+	// concat, music mix) keeps working unchanged. Stage 6 then bumps the music
+	// volume since there's no voice to duck under and skips Whisper captions.
+	if payload.VoiceoverMode == "none" {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 3, StageName: "Voiceover",
+			ProgressPct: 50,
+			Message:     "No-voice mode — generating silent placeholders for music-only video...",
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		})
+
+		for _, seg := range segments {
+			voicePath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_voice.mp3", seg.SegmentID))
+
+			dur := seg.DurationSec
+			if dur < 2 {
+				dur = 2 // safety floor for very short hooks
+			}
+			if dur > 600 {
+				dur = 600 // sanity ceiling
+			}
+
+			// anullsrc generates a silent stereo track at 44.1kHz; we re-encode
+			// to MP3 (libmp3lame) so the file is interchangeable with what the
+			// other voiceover modes produce.
+			cmd := exec.Command("ffmpeg",
+				"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+				"-t", fmt.Sprintf("%d", dur),
+				"-q:a", "9", "-acodec", "libmp3lame",
+				"-y", voicePath,
+			)
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("generate silent placeholder for seg %d: %w", seg.SegmentID, err)
+			}
+
+			job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = voicePath
+		}
+
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 3, StageName: "Voiceover",
+			ProgressPct: 100,
+			Message:     fmt.Sprintf("Generated %d silent placeholders (no narration).", len(segments)),
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		})
+
+		reconcileScriptDurations(job)
+		return nil
+	}
+
 	if payload.VoiceoverMode == "manual" {
 		// Manual mode: user provides their own voice files via Base64 or manual copy
 		progress(models.ProgressEvent{
@@ -137,8 +187,9 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 	// Google Cloud TTS mode
 	if payload.VoiceoverMode == "gcp_tts" {
 		gcpKey := config.App.GoogleCloudTTSAPIKey
-		if gcpKey == "" {
-			return fmt.Errorf("GOOGLE_CLOUD_TTS_API_KEY not configured — set it in .env or switch to another voiceover mode")
+		hasSA := HasGCPServiceAccount()
+		if gcpKey == "" && !hasSA {
+			return fmt.Errorf("GCP TTS not configured — set GOOGLE_CLOUD_TTS_API_KEY (basic voices) and/or GOOGLE_APPLICATION_CREDENTIALS_JSON (premium voices like Chirp 3 HD), or switch to another voiceover mode")
 		}
 
 		for i, seg := range segments {

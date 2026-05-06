@@ -13,6 +13,37 @@ import (
 	"yt-automation-studio/models"
 )
 
+// resolveResolution maps an aspect ratio name to (width, height, "W:H" string)
+// suitable for FFmpeg scale/pad filters. Defaults to landscape 1920x1080.
+func resolveResolution(aspect string) (int, int, string) {
+	switch aspect {
+	case "portrait":
+		return 1080, 1920, "1080:1920"
+	case "square":
+		return 1080, 1080, "1080:1080"
+	case "landscape":
+		fallthrough
+	default:
+		return 1920, 1080, "1920:1080"
+	}
+}
+
+// fitFilter returns the FFmpeg filter chain that scales an input video to
+// exactly width×height according to the chosen fit mode:
+//   - "fill" (default): zoom-and-crop (force_original_aspect_ratio=increase + crop).
+//     The frame is fully filled with content; edges are cropped if aspect ratios differ.
+//   - "fit": letterbox/pillarbox (force_original_aspect_ratio=decrease + black pad).
+//     The entire source is preserved; black bars fill any leftover space.
+func fitFilter(width, height int, fitMode string) string {
+	if fitMode == "fit" {
+		return fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black",
+			width, height, width, height)
+	}
+	// "fill" / default
+	return fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d",
+		width, height, width, height)
+}
+
 // segmentTailPad returns the silence-pad after a segment based on its type.
 // This produces a podcast-like cadence: a tiny breath after the hook,
 // brief pauses between body segments, and a longer outro after the CTA.
@@ -40,13 +71,22 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	os.MkdirAll(segDir, 0755)
 
 	segments := job.Script.Segments
-	isShort := job.Payload.Format == "short"
-	resolution := "1920:1080"
-	width, height := 1920, 1080
-	if isShort {
-		resolution = "1080:1920"
-		width, height = 1080, 1920
+	// Resolution derives from AspectRatio (landscape | portrait | square),
+	// independent of long/short format. This lets users render Shorts in
+	// landscape or long-form videos in portrait/square as needed.
+	width, height, resolution := resolveResolution(job.Payload.AspectRatio)
+	isVertical := job.Payload.AspectRatio == "portrait" || job.Payload.AspectRatio == "square"
+	fitMode := job.Payload.FitMode
+	if fitMode == "" {
+		fitMode = "fill"
 	}
+	scaleFilter := fitFilter(width, height, fitMode)
+	voiceMuted := job.Payload.VoiceoverMode == "none"
+	profile := ProfileFor(job.Payload.OutputQuality)
+	fpsStr := fmt.Sprintf("%d", profile.FPS)
+	log.Printf("📐 Job %s — render aspect=%q resolution=%s fit=%s (format=%s) voice_muted=%v quality=%s preset=%s crf=%s fps=%d",
+		job.JobID[:8], job.Payload.AspectRatio, resolution, fitMode, job.Payload.Format,
+		voiceMuted, profile.Quality, profile.Preset, profile.CRF, profile.FPS)
 
 	// Step 6a — Build segment videos from sub-visuals + voice
 	progress(models.ProgressEvent{
@@ -106,12 +146,12 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				preparedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_sub_%02d_prep.mp4", seg.SegmentID, j))
 
 				if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
-					frames := int(subClipDuration * 30)
-					vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
+					frames := int(subClipDuration * float64(profile.FPS))
+					vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=%d", width, height, width, height, frames, width, height, profile.FPS)
 					args := []string{
 						"-loop", "1", "-i", clipPath,
 						"-c:v", "libx264", "-t", fmt.Sprintf("%.3f", subClipDuration),
-						"-pix_fmt", "yuv420p", "-r", "30",
+						"-pix_fmt", "yuv420p", "-r", fpsStr,
 						"-vf", vf,
 						"-y", preparedPath,
 					}
@@ -119,12 +159,19 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 						return fmt.Errorf("image to video seg %d sub %d: %w", seg.SegmentID, j, err)
 					}
 				} else {
+					// Scale to target frame using the user's chosen fit mode:
+					//   "fill" — zoom-and-crop, fully fills the frame (default).
+					//   "fit"  — letterbox/pillarbox, preserves the entire source.
+					// This pass is intermediate (re-encoded again at segment-sync
+					// time) so we keep it fast/CRF-23 even in High quality mode —
+					// the profile preset/CRF apply at the master encode passes
+					// below where they matter.
 					args := []string{
 						"-i", clipPath,
 						"-t", fmt.Sprintf("%.3f", subClipDuration),
-						"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black", resolution, resolution),
+						"-vf", scaleFilter,
 						"-c:v", "libx264", "-preset", "fast", "-crf", "23",
-						"-pix_fmt", "yuv420p", "-an", "-r", "30",
+						"-pix_fmt", "yuv420p", "-an", "-r", fpsStr,
 						"-y", preparedPath,
 					}
 					if err := runFFmpeg(args); err != nil {
@@ -149,10 +196,11 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 				os.WriteFile(concatPath, []byte(strings.Join(lines, "\n")), 0644)
 
 				segmentVideoPath = filepath.Join(segDir, fmt.Sprintf("seg_%02d_subcombined.mp4", seg.SegmentID))
+				// Intermediate concat (re-encoded again at segment-sync). Keep fast.
 				args := []string{
 					"-f", "concat", "-safe", "0", "-i", concatPath,
 					"-c:v", "libx264", "-preset", "fast", "-crf", "23",
-					"-pix_fmt", "yuv420p", "-r", "30",
+					"-pix_fmt", "yuv420p", "-r", fpsStr,
 					"-y", segmentVideoPath,
 				}
 				if err := runFFmpeg(args); err != nil {
@@ -168,12 +216,12 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 
 			if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
 				imgVideoPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_imgvid.mp4", seg.SegmentID))
-				frames := int(segTarget * 30)
-				vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=30", width, height, width, height, frames, width, height)
+				frames := int(segTarget * float64(profile.FPS))
+				vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=%d", width, height, width, height, frames, width, height, profile.FPS)
 				args := []string{
 					"-loop", "1", "-i", clipPath,
 					"-c:v", "libx264", "-t", segTargetStr,
-					"-pix_fmt", "yuv420p", "-r", "30",
+					"-pix_fmt", "yuv420p", "-r", fpsStr,
 					"-vf", vf,
 					"-y", imgVideoPath,
 				}
@@ -191,17 +239,26 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 		// for voiceDur seconds, then exactly tailPad seconds of silence — that's the
 		// natural breath that makes segment transitions sound human.
 		syncedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_synced.mp4", seg.SegmentID))
+		// Apply the user's chosen fit mode (fill = zoom-crop, fit = letterbox).
+		// When the source already matches the target frame, this is a no-op;
+		// when it doesn't, it either crops or pads as configured. Sub-clips
+		// usually arrive at target res from the prep step above, so this
+		// final pass is mostly defensive against per-clip edge cases.
 		filterComplex := fmt.Sprintf(
-			"[0:v]scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2:color=black,tpad=stop_mode=clone:stop_duration=%s,trim=duration=%s,setpts=PTS-STARTPTS[v];"+
+			"[0:v]%s,tpad=stop_mode=clone:stop_duration=%s,trim=duration=%s,setpts=PTS-STARTPTS[v];"+
 				"[1:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS[a]",
-			resolution, resolution, segTargetStr, segTargetStr, segTargetStr, segTargetStr,
+			scaleFilter, segTargetStr, segTargetStr, segTargetStr, segTargetStr,
 		)
+		// Segment sync — produces a per-segment master synced with voice. The
+		// quality profile applies here so High mode actually reaches the final
+		// output. Intermediate sub-clip prep above stays at fast/23 because
+		// those files get re-encoded at this very step.
 		args := []string{
 			"-i", segmentVideoPath, "-i", voicePath,
 			"-filter_complex", filterComplex,
 			"-map", "[v]", "-map", "[a]",
-			"-c:v", "libx264", "-preset", "fast", "-crf", "23",
-			"-pix_fmt", "yuv420p", "-r", "30",
+			"-c:v", "libx264", "-preset", profile.Preset, "-crf", profile.CRF,
+			"-pix_fmt", "yuv420p", "-r", fpsStr,
 			"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
 			"-y", syncedPath,
 		}
@@ -232,11 +289,14 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	rawCombined := filepath.Join(jobDir, "raw_combined.mp4")
 	// Re-encode during concat to prevent AAC priming/padding gaps from
 	// accumulating between segments. -c copy preserves these gaps and
-	// causes audio-shorter-than-video issues downstream.
+	// causes audio-shorter-than-video issues downstream. This is also the
+	// master video encode — when finalRender skips captions burn-in it just
+	// stream-copies this file's video, so the quality profile applied here
+	// reaches the final output.
 	args := []string{
 		"-f", "concat", "-safe", "0", "-i", concatListPath,
-		"-c:v", "libx264", "-preset", "fast", "-crf", "23",
-		"-pix_fmt", "yuv420p", "-r", "30",
+		"-c:v", "libx264", "-preset", profile.Preset, "-crf", profile.CRF,
+		"-pix_fmt", "yuv420p", "-r", fpsStr,
 		"-c:a", "aac", "-b:a", "192k", "-ar", "48000",
 		"-fflags", "+genpts",
 		"-y", rawCombined,
@@ -250,18 +310,30 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	rawAudioDur := GetStreamDuration(rawCombined, "a")
 	log.Printf("📊 Job %s — raw_combined.mp4: video=%.3fs, audio=%.3fs", job.JobID[:8], rawVideoDur, rawAudioDur)
 
-	// Step 6c — Generate captions with Whisper
-	progress(models.ProgressEvent{
-		JobID: job.JobID, Stage: 6, StageName: "Video Render",
-		ProgressPct: 65, Message: "Generating captions...",
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	})
-
+	// Step 6c — Generate captions with Whisper.
+	// Skip in no-voice mode: the audio is silent so Whisper would either
+	// produce empty output or hallucinate. The viewer doesn't expect captions
+	// on a music-only video anyway.
 	captionsPath := filepath.Join(jobDir, "captions.srt")
-	if err := generateCaptions(rawCombined, captionsPath); err != nil {
-		job.AddError(fmt.Sprintf("Caption generation failed: %v — continuing without captions", err))
+	if voiceMuted {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 6, StageName: "Video Render",
+			ProgressPct: 65, Message: "Skipping captions (no-voice mode)...",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+		log.Printf("🎵 Job %s — voice_muted=true, skipping Whisper caption generation", job.JobID[:8])
+	} else {
+		progress(models.ProgressEvent{
+			JobID: job.JobID, Stage: 6, StageName: "Video Render",
+			ProgressPct: 65, Message: "Generating captions...",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
+
+		if err := generateCaptions(rawCombined, captionsPath); err != nil {
+			job.AddError(fmt.Sprintf("Caption generation failed: %v — continuing without captions", err))
+		}
+		job.CaptionsFile = captionsPath
 	}
-	job.CaptionsFile = captionsPath
 
 	// Step 6d — Final render with music + captions
 	progress(models.ProgressEvent{
@@ -271,7 +343,7 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 	})
 
 	finalOutput := filepath.Join(jobDir, "final_output.mp4")
-	if err := finalRender(rawCombined, job.MusicFile, captionsPath, finalOutput, job.Payload.CaptionStyle, isShort); err != nil {
+	if err := finalRender(rawCombined, job.MusicFile, captionsPath, finalOutput, job.Payload.CaptionStyle, isVertical, voiceMuted, profile); err != nil {
 		return fmt.Errorf("final render: %w", err)
 	}
 
@@ -280,9 +352,21 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 }
 
 // finalRender uses a 2-pass approach for maximum reliability:
-//  Pass 1: prepare the final audio track of EXACTLY video duration in a separate file.
-//  Pass 2: mux video + prepared audio + captions, then verify final durations.
-func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle string, isShort bool) error {
+//   Pass 1: prepare the final audio track of EXACTLY video duration in a separate file.
+//   Pass 2: mux video + prepared audio + captions, then verify final durations.
+//
+// isVertical = true for portrait/square aspect ratios — used to scale up the
+// caption font size since vertical layouts have less horizontal text room.
+//
+// voiceMuted = true means the per-segment "voice" tracks are actually silent
+// placeholders (no-voice / music-only mode). prepareFinalAudio uses this to
+// boost music volume from a duck-under-voice level to near full.
+//
+// profile carries the user-selected output_quality so the captions burn-in
+// pass (which re-encodes video) matches what the segment-sync + raw_combined
+// passes produced. When captions are disabled, finalRender stream-copies the
+// video and the profile only affects audio bitrate (which is fixed anyway).
+func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle string, isVertical, voiceMuted bool, profile EncodeProfile) error {
 	hasCaptions := fileExists(captionsPath) && captionStyle != "none"
 	hasMusic := musicPath != "" && fileExists(musicPath)
 
@@ -307,7 +391,7 @@ func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle st
 
 	// Pass 1: Prepare the final audio track to a separate file
 	preparedAudioPath := filepath.Join(jobDir, "final_audio.m4a")
-	if err := prepareFinalAudio(videoPath, loopedMusicPath, preparedAudioPath, videoDuration, hasMusic); err != nil {
+	if err := prepareFinalAudio(videoPath, loopedMusicPath, preparedAudioPath, videoDuration, hasMusic, voiceMuted); err != nil {
 		return fmt.Errorf("prepare final audio: %w", err)
 	}
 
@@ -320,7 +404,7 @@ func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle st
 	var args []string
 	if hasCaptions {
 		fontSize := "14"
-		if isShort {
+		if isVertical {
 			fontSize = "22"
 		}
 		fontStyle := fmt.Sprintf("FontName=Arial,FontSize=%s,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Shadow=1,Alignment=2", fontSize)
@@ -333,7 +417,7 @@ func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle st
 			"-vf", fmt.Sprintf("subtitles=%s:force_style='%s'", filepath.ToSlash(captionsPath), fontStyle),
 			"-map", "0:v", "-map", "1:a",
 			"-t", durStr,
-			"-c:v", "libx264", "-preset", "medium", "-crf", "21",
+			"-c:v", "libx264", "-preset", profile.Preset, "-crf", profile.CRF,
 			"-c:a", "aac", "-b:a", "192k",
 			"-shortest",
 			"-avoid_negative_ts", "make_zero",
@@ -374,17 +458,26 @@ func finalRender(videoPath, musicPath, captionsPath, outputPath, captionStyle st
 
 // prepareFinalAudio generates a complete audio track of exactly targetDuration seconds.
 // It pads the voice with silence to match duration, optionally mixes in music.
-func prepareFinalAudio(videoPath, musicPath, outputPath string, targetDuration float64, hasMusic bool) error {
+//
+// voiceMuted = true tells us the "voice" stream from videoPath is actually a
+// silent placeholder (music-only mode). In that case music takes over as the
+// primary audio at near-full volume, instead of being ducked under narration.
+func prepareFinalAudio(videoPath, musicPath, outputPath string, targetDuration float64, hasMusic, voiceMuted bool) error {
 	durStr := fmt.Sprintf("%.3f", targetDuration)
 
 	var args []string
 	if hasMusic {
-		// Mix voice (padded to duration) + music (already pre-looped to >= duration)
+		// Music volume — duck under voice in narrated modes, but take over the
+		// soundtrack in music-only mode.
+		musicVol := "0.12"
+		if voiceMuted {
+			musicVol = "0.9"
+		}
 		filterComplex := fmt.Sprintf(
 			"[0:a]apad=whole_dur=%s,atrim=duration=%s,asetpts=PTS-STARTPTS,volume=1.0[voice];"+
-				"[1:a]atrim=duration=%s,asetpts=PTS-STARTPTS,volume=0.12[music];"+
+				"[1:a]atrim=duration=%s,asetpts=PTS-STARTPTS,volume=%s[music];"+
 				"[voice][music]amix=inputs=2:duration=longest:dropout_transition=0[aout]",
-			durStr, durStr, durStr,
+			durStr, durStr, durStr, musicVol,
 		)
 		args = []string{
 			"-i", videoPath,

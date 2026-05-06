@@ -111,10 +111,32 @@ the user's pacing choice is respected even if the LLM drifts.
 - Output: `segments/seg_XX_voice.mp3`
 - Free tier: 1M chars/month for WaveNet/Neural2, 4M chars/month for Standard
 
+**Authentication (two supported modes — pick one or both):**
+
+| Mode | Env var(s) | Voice families unlocked |
+| --- | --- | --- |
+| API key | `GOOGLE_CLOUD_TTS_API_KEY` | Standard, Wavenet, Neural2, News, Casual, Polyglot, regular Chirp HD |
+| Service account (OAuth) | `GOOGLE_APPLICATION_CREDENTIALS_JSON` (raw JSON) **or** `GOOGLE_APPLICATION_CREDENTIALS` (file path) | All of the above **plus** Chirp 3 HD and Studio |
+
+Service account preference is automatic: when configured, every TTS call uses Bearer-token auth via `pipeline/gcp_auth.go` (which uses `golang.org/x/oauth2/google.CredentialsFromJSON` with scope `https://www.googleapis.com/auth/cloud-platform` and caches/refreshes tokens internally). Otherwise it falls back to `?key=<api_key>`.
+
+**Why this matters:** Google rejects API-key auth for Chirp 3 HD / Studio voices with a misleading 400 "This voice requires a model name to be specified." Our auth helper short-circuits before the call, so:
+- In API-key mode, premium voices are filtered out of `ListGCPVoices` so users can't pick them.
+- In service-account mode, premium voices are returned (with a `premium: true` flag the UI uses to badge them).
+- If a user ever supplies a premium voice name with only API-key auth (e.g. stale cached UI state), `SynthesizeGCPTTS` returns a clear local error before round-tripping to Google.
+
 ### Manual Mode (`voiceover_mode = "manual"`)
 - Decodes base64 audio from `ManualAudioBase64[segment_id]`
 - Converts WebM → MP3 via FFmpeg
 - Falls back to silent placeholder audio if a segment's recording is missing
+
+### Music-Only Mode (`voiceover_mode = "none"`)
+- No narration. The script is still generated (it drives visual planning and segment timing) but no TTS or recording is performed.
+- Stage 3 produces silent MP3 placeholders sized to each segment's planned `DurationSec` (using FFmpeg's `anullsrc` filter).
+- Stage 6 detects this mode (`voiceMuted=true` flag derived from `payload.VoiceoverMode == "none"`) and:
+  - **Skips Whisper caption generation** entirely — there's no speech to transcribe and Whisper would either return empty or hallucinate against pure silence.
+  - **Boosts music volume** in `prepareFinalAudio` from `0.12` (ducked under voice) to `0.9` (near-full) so the soundtrack carries the video.
+- Combined with `music_mode = "skip"`, this produces a fully silent video. Combined with `music_mode = "auto"` or `manual`, it produces a music-driven video with no narration — useful for highlight reels, mood / aesthetic shorts, and montages.
 
 **Voice ID mapping (ElevenLabs):**
 | ID | ElevenLabs Voice ID | Description |
@@ -146,16 +168,21 @@ When no `SubVisuals` exist, falls back to one visual per segment using `VisualQu
 **Stock clips (Pexels):**
 - Endpoint: `https://api.pexels.com/videos/search`
 - Auth: `Authorization: {PEXELS_API_KEY}`
-- Prefers HD quality (≥1280px wide)
-- Dedup: Tracks used queries; modifies duplicates by appending "cinematic"
-- Retry: Broadens query to first 3 words on failure
+- **Orientation** is derived from `payload.aspect_ratio` — `landscape` / `portrait` / `square` are passed directly to Pexels' `orientation` query param so portrait Shorts source from portrait footage (no zoom-crop quality loss).
+- **Source resolution** is governed by the `output_quality` profile (`pipeline/quality.go::ProfileFor`):
+  - `draft` — `size=medium`, minimum width 1280
+  - `standard` — `size=large`, minimum width 1280
+  - `high` — `size=large`, minimum width 1920 (FHD master)
+- **File selection (`pickBestVideoFile`)**: candidates are sorted by `width` ascending; we pick the smallest file with `width >= target_output_width` (1920 for landscape, 1080 for portrait). This avoids upscaling 720p → 1080p **and** wastes no bandwidth on 4K when our render frame is only 1080p. If no file meets the target, falls back to the largest available.
+- **Dedup:** Tracks used queries + video IDs + URLs across the whole job (`usedVideoTracker`) so the same asset never appears twice. When all top results are already used, falls back gracefully (relax min-width gate, then last resort allows reuse).
+- **Retry:** Broadens query to first 3 words on failure.
 
 **AI Images (Together AI → HuggingFace fallback):**
 
 Together AI:
 - Model: `black-forest-labs/FLUX.1-schnell-Free`
 - Endpoint: `https://api.together.xyz/v1/images/generations`
-- Resolution: 1792x1024 (landscape) or 1024x1792 (shorts)
+- Resolution: derived from `payload.aspect_ratio` — 1792×1024 (landscape), 1024×1792 (portrait), or 1280×1280 (square)
 - Steps: 4
 
 HuggingFace (fallback):
@@ -233,9 +260,43 @@ Combines video + music + captions:
 - Caption styles: `bold_white` (bold + outline + shadow) or `subtitle` (clean outline)
 - Output: `final_output.mp4` with `libx264`, `crf 21`, `faststart`
 
-**Resolution:**
-- Long form: 1920x1080 (landscape)
-- Short form: 1080x1920 (portrait)
+**Resolution (derived from `payload.aspect_ratio`):**
+- `landscape` → 1920×1080 (16:9, default for long-form / YouTube)
+- `portrait` → 1080×1920 (9:16, default for Shorts / TikTok / Reels)
+- `square` → 1080×1080 (1:1, Instagram feed / LinkedIn)
+
+Aspect ratio is independent of duration `format`, so any combination is valid
+(e.g. a long-form video in portrait for TikTok, or a Short in landscape for X).
+The renderer's `resolveResolution()` helper centralises this mapping so all
+filter graphs (segment scale/pad, AI image gen, final mux) stay consistent.
+
+**Fit mode (`payload.fit_mode`):**
+- `fill` (default) — `scale=W:H:force_original_aspect_ratio=increase, crop=W:H`.
+  Frame is fully covered with content; mismatched aspect ratios get center-cropped.
+- `fit` — `scale=W:H:force_original_aspect_ratio=decrease, pad=W:H:...:color=black`.
+  The entire source is preserved; black bars fill any leftover space.
+
+The `fitFilter()` helper in `pipeline/renderer.go` centralises this so the
+sub-clip prep step and the segment sync filter chain both apply the same
+behavior consistently.
+
+**Output Quality (`payload.output_quality`):**
+
+The renderer reads the user-selected quality once via `ProfileFor()` (`pipeline/quality.go`) and applies it consistently across every encode pass:
+
+| Quality | x264 `-preset` | `-crf` | `-r` (fps) | Pexels source |
+| --- | --- | --- | --- | --- |
+| `draft` | `ultrafast` | `28` | `30` | `size=medium`, ≥1280w |
+| `standard` (default) | `fast` | `23` | `30` | `size=large`, ≥1280w |
+| `high` | `medium` | `18` | `30` | `size=large`, ≥1920w |
+
+**Where the profile applies:**
+- **Master encode passes** — segment sync (per-segment audio-synced master), `raw_combined.mp4` concat (full video master), and the captions burn-in pass in `finalRender` — all use the profile's `preset`/`crf`/`fps`.
+- **Intermediate prep passes** (sub-clip trims, sub-clip concats) intentionally stay at `fast`/`crf=23` even in `high` mode — they get re-encoded again at segment-sync time, so spending CPU on them is wasted.
+- **Image-loop ken-burns passes** scale the `zoompan` frame count by `profile.FPS` so the motion remains smooth at the chosen framerate.
+- **Trim handler** (`/api/jobs/{id}/trim`) is a one-off post-render edit and stays at `fast`/`crf=21`; it doesn't carry the original render's profile.
+
+**Why intermediate stays cheap:** Each pipeline pass loses a tiny bit of detail. The expensive `medium`/`crf=18` pass is reserved for the *last* re-encode each frame goes through — that's where the user-visible quality is set. Earlier passes at `fast`/`crf=23` produce fine source for that final encode without inflating render time.
 
 ---
 

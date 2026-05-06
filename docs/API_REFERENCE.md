@@ -19,6 +19,9 @@ Request body: `InputPayload` JSON (see [DATA_MODELS.md](DATA_MODELS.md) for full
   "input_type": "topic",
   "format": "long",
   "duration_min": 8,
+  "aspect_ratio": "landscape",
+  "fit_mode": "fill",
+  "output_quality": "standard",
   "voiceover_mode": "ai",
   "voice_id": "adam",
   "video_mode": "auto",
@@ -32,7 +35,9 @@ Request body: `InputPayload` JSON (see [DATA_MODELS.md](DATA_MODELS.md) for full
   "clip_count": 0,
   "image_count": 0,
   "seconds_per_visual": 6,
-  "ai_image_percent": 0
+  "ai_image_percent": 0,
+  "aspect_ratio": "landscape",
+  "fit_mode": "fill"
 }
 ```
 
@@ -42,6 +47,22 @@ visual appears: roughly one new shot per N seconds of narration. `ai_image_perce
 When `clip_count` and `image_count` are both 0, the backend derives them from the
 pacing fields and the estimated video duration; if either is explicitly set,
 those values are honored instead (legacy behaviour).
+
+Aspect ratio — `aspect_ratio` is one of `landscape` (1920×1080, 16:9, default for
+`long`/`both`), `portrait` (1080×1920, 9:16, default for `short`), or `square`
+(1080×1080, 1:1). It is independent of `format`, so you can render Shorts in
+landscape (e.g. for X/LinkedIn) or long-form videos in portrait (e.g. for
+TikTok/Reels). Both stock footage padding and AI-image generation honor this
+setting.
+
+Fit mode — `fit_mode` is one of `fill` (default) or `fit`:
+- `fill` — zoom-and-crop. Source is upscaled until it fully covers the target
+  frame; overflowing edges are center-cropped. No black bars. Best for the modern
+  Shorts/TikTok/Reels look where every pixel is content.
+- `fit` — letterbox/pillarbox. Source is shrunk to fit entirely inside the target
+  frame; remaining space is filled with black bars (top/bottom for landscape→portrait,
+  sides for portrait→landscape). Preserves the entire original frame — useful when
+  important content sits near the edges and you cannot afford any cropping.
 
 Response `202 Accepted`:
 ```json
@@ -188,7 +209,27 @@ Response:
 }
 ```
 
-Returns HTTP 503 if `GOOGLE_CLOUD_TTS_API_KEY` is not configured.
+Returns HTTP 503 if neither `GOOGLE_CLOUD_TTS_API_KEY` nor a service account is configured.
+
+The response also includes:
+```json
+{
+  "voices": [...],
+  "service_account_configured": true,
+  "premium_voices_available": true
+}
+```
+
+Each voice object now has a `premium: true` flag for Chirp 3 HD / Studio voices.
+
+**Auth modes & which voices are returned:**
+
+| Mode | Voices returned | Premium voices? |
+| --- | --- | --- |
+| API key only (`GOOGLE_CLOUD_TTS_API_KEY`) | Standard, Wavenet, Neural2, News, Casual, Polyglot, regular Chirp HD | Filtered out — would fail with Google's misleading "requires a model name" 400 |
+| Service account (`GOOGLE_APPLICATION_CREDENTIALS_JSON` or `GOOGLE_APPLICATION_CREDENTIALS`) | All of the above **plus** Chirp 3 HD and Studio | Yes, premium voices included |
+
+Set `GOOGLE_APPLICATION_CREDENTIALS_JSON` (raw JSON in the env, Docker-friendly) or `GOOGLE_APPLICATION_CREDENTIALS` (path to a JSON file). The service account needs the `roles/texttospeech.user` role.
 
 ### POST /api/gcp-tts/synthesize
 **Synthesize text to speech using Google Cloud TTS (for preview).**

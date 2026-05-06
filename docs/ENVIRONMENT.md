@@ -8,7 +8,9 @@ Configuration is loaded from `.env` at startup via `godotenv` (silently skipped 
 |----------|-------------|---------|-------------|
 | `GROQ_API_KEY` | Stages 1, 2 + script refinement | `pipeline/input_parser.go`, `pipeline/script_gen.go` | Groq API key for Llama 3.3 70B. **Primary LLM for all text generation.** |
 | `ELEVENLABS_API_KEY` | Stage 3 (AI voiceover) | `pipeline/voiceover.go` | ElevenLabs TTS API key. Not needed if using manual voiceover or Google TTS. |
-| `GOOGLE_CLOUD_TTS_API_KEY` | Stage 3 (Google TTS voiceover) | `pipeline/gcp_tts.go`, `api/handlers.go` | Google Cloud Text-to-Speech API key. Required only for `gcp_tts` voiceover mode. |
+| `GOOGLE_CLOUD_TTS_API_KEY` | Stage 3 (Google TTS voiceover, basic voices) | `pipeline/gcp_tts.go`, `api/handlers.go` | Google Cloud Text-to-Speech API key. Unlocks Standard / Wavenet / Neural2 / News / Casual / Polyglot / regular Chirp HD voices. |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Stage 3 (Google TTS, premium voices) | `pipeline/gcp_auth.go` | Service-account JSON pasted directly as the env value (Docker-friendly). When set, unlocks Chirp 3 HD and Studio voices in addition to all basic ones. Mutually exclusive with `GOOGLE_APPLICATION_CREDENTIALS` (this one wins if both are set). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Stage 3 (Google TTS, premium voices) | `pipeline/gcp_auth.go` | Path to a service-account JSON file inside the container. Same effect as `GOOGLE_APPLICATION_CREDENTIALS_JSON`. |
 | `PEXELS_API_KEY` | Stage 4 (stock video) | `pipeline/visual.go` | Pexels API key for stock video clip search/download. |
 | `TOGETHER_API_KEY` | Stage 4 (AI images, primary) | `pipeline/visual.go` | Together AI key for FLUX.1-schnell image generation. |
 | `HF_API_KEY` | Stage 4 (AI images, fallback) | `pipeline/visual.go` | Hugging Face Inference API key. Used when Together AI fails. |
@@ -45,7 +47,8 @@ YouTube upload is **optional**. If these files don't exist, Stage 7 succeeds wit
 
 The `.env.example` file documents all configurable keys. Notable points:
 
-- `GOOGLE_CLOUD_TTS_API_KEY` is optional — only needed if using Google TTS voiceover mode.
+- `GOOGLE_CLOUD_TTS_API_KEY` is optional — only needed if using Google TTS voiceover mode (basic voices).
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON` / `GOOGLE_APPLICATION_CREDENTIALS` are optional — set one of them to unlock premium voice families (Chirp 3 HD, Studio). The service account needs the `roles/texttospeech.user` IAM role.
 - `ELEVENLABS_API_KEY` is optional — only needed if using AI voiceover mode.
 - At least one TTS provider key is required if using AI-generated voiceover.
 

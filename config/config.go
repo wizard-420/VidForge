@@ -22,6 +22,14 @@ type Config struct {
 	HFAPIKey             string
 	JamendoClientID      string
 
+	// Google Cloud Service Account (for premium TTS voices like Chirp 3 HD,
+	// Studio). Either may be set; JSON env var takes precedence over file path.
+	// When neither is set, GCP TTS falls back to API-key auth which only
+	// supports Standard / Wavenet / Neural2 / News / Casual / Polyglot /
+	// regular Chirp HD voices.
+	GoogleApplicationCredentialsJSON string
+	GoogleApplicationCredentialsFile string
+
 	// YouTube OAuth
 	YouTubeClientSecretFile string
 	YouTubeTokenFile        string
@@ -53,6 +61,9 @@ func Load() {
 		TogetherAPIKey:   getEnv("TOGETHER_API_KEY", ""),
 		HFAPIKey:         getEnv("HF_API_KEY", ""),
 		JamendoClientID:  getEnv("JAMENDO_CLIENT_ID", "b6747d04"), // default if empty
+
+		GoogleApplicationCredentialsJSON: getEnv("GOOGLE_APPLICATION_CREDENTIALS_JSON", ""),
+		GoogleApplicationCredentialsFile: getEnv("GOOGLE_APPLICATION_CREDENTIALS", ""),
 
 		YouTubeClientSecretFile: getEnv("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json"),
 		YouTubeTokenFile:        getEnv("YOUTUBE_TOKEN_FILE", "token.json"),
@@ -97,15 +108,24 @@ func (c *Config) GetMaskedSettings() map[string]interface{} {
 // HasRequiredKeys checks if minimum API keys are configured
 func (c *Config) HasRequiredKeys() map[string]bool {
 	return map[string]bool{
-		"groq":           c.GroqAPIKey != "",
-		"elevenlabs":     c.ElevenLabsAPIKey != "",
-		"google_tts":     c.GoogleCloudTTSAPIKey != "",
-		"pexels":         c.PexelsAPIKey != "",
-		"pixabay":        c.PixabayAPIKey != "",
-		"openai":         c.OpenAIAPIKey != "",
-		"together":       c.TogetherAPIKey != "",
-		"hf":             c.HFAPIKey != "",
+		"groq":               c.GroqAPIKey != "",
+		"elevenlabs":         c.ElevenLabsAPIKey != "",
+		"google_tts":         c.GoogleCloudTTSAPIKey != "",
+		"google_tts_premium": c.HasGCPServiceAccount(),
+		"pexels":             c.PexelsAPIKey != "",
+		"pixabay":            c.PixabayAPIKey != "",
+		"openai":             c.OpenAIAPIKey != "",
+		"together":           c.TogetherAPIKey != "",
+		"hf":                 c.HFAPIKey != "",
 	}
+}
+
+// HasGCPServiceAccount reports whether a service-account credential is
+// configured (either as raw JSON or a file path). When true, GCP TTS premium
+// voice families (Chirp 3 HD, Studio) become available.
+func (c *Config) HasGCPServiceAccount() bool {
+	return strings.TrimSpace(c.GoogleApplicationCredentialsJSON) != "" ||
+		strings.TrimSpace(c.GoogleApplicationCredentialsFile) != ""
 }
 
 // --- Helpers ---

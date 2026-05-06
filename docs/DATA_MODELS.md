@@ -15,8 +15,11 @@ The primary object created from user input. Starting point for every pipeline ru
 | InputType | `input_type` | string | `category`, `topic`, `event` | — | How to interpret RawInput |
 | Format | `format` | string | `long`, `short`, `both` | `long` | Video format |
 | DurationMin | `duration_min` | int | 5–20 (long), forced 1 (short) | 8 (long), 1 (short) | Target duration in minutes |
-| VoiceoverMode | `voiceover_mode` | string | `ai`, `manual` | `ai` | TTS mode |
-| VoiceID | `voice_id` | string | `adam`, `rachel`, `domi`, `josh` | `adam` | ElevenLabs voice (only for ai mode) |
+| VoiceoverMode | `voiceover_mode` | string | `ai`, `manual`, `gcp_tts`, `none` | `ai` | TTS mode. `none` = music-only video (no narration; silent placeholder MP3s drive timing, music plays at near-full volume, captions are skipped) |
+| VoiceID | `voice_id` | string | `adam`, `rachel`, `domi`, `josh` | `adam` | ElevenLabs voice (only for `ai` mode) |
+| GCPVoiceName | `gcp_voice_name` | string | e.g. `en-US-Neural2-D` | — | Google Cloud TTS voice (only for `gcp_tts` mode) |
+| GCPLanguageCode | `gcp_language_code` | string | BCP-47 e.g. `en-US` | — | Google Cloud TTS language (only for `gcp_tts` mode) |
+| OutputQuality | `output_quality` | string | `draft`, `standard`, `high` | `standard` | Picks Pexels source resolution (`size=` filter + minimum width) and FFmpeg `-preset` / `-crf` / `-r`. `draft`=ultrafast/CRF28/medium, `standard`=fast/CRF23/large, `high`=medium/CRF18/large+min1920w. See `pipeline/quality.go::ProfileFor`. |
 | VideoMode | `video_mode` | string | `auto`, `manual` | `auto` | Visual asset fetching mode |
 | VideoStyle | `video_style` | string | `stock`, `ai_images`, `mixed` | `stock` | Type of visuals to use |
 | MusicMode | `music_mode` | string | `auto`, `skip`, `manual` | `auto` | Background music mode |

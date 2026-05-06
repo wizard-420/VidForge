@@ -9,8 +9,10 @@ type InputPayload struct {
 	RawInput      string `json:"raw_input"`
 	InputType     string `json:"input_type"`      // category | topic | event
 	Format        string `json:"format"`           // long | short | both
+	AspectRatio   string `json:"aspect_ratio"`     // landscape (16:9) | portrait (9:16) | square (1:1)
+	FitMode       string `json:"fit_mode"`         // fill (zoom-and-crop, default) | fit (letterbox/pillarbox with black bars)
 	DurationMin   int    `json:"duration_min"`     // 5-20 for long, forced 1 for short
-	VoiceoverMode string `json:"voiceover_mode"`   // ai | manual
+	VoiceoverMode string `json:"voiceover_mode"`   // ai | manual | gcp_tts | none
 	VoiceID       string `json:"voice_id"`         // adam | rachel | domi | josh
 	VideoMode     string `json:"video_mode"`       // auto | manual
 	VideoStyle    string `json:"video_style"`      // stock | ai_images | mixed
@@ -29,6 +31,7 @@ type InputPayload struct {
 	MusicEnd           int                  `json:"music_end"`        // crop end in seconds
 	GCPVoiceName       string               `json:"gcp_voice_name,omitempty"`       // Google Cloud TTS voice name (e.g. "en-US-Neural2-D")
 	GCPLanguageCode    string               `json:"gcp_language_code,omitempty"`    // BCP-47 language code (e.g. "en-US")
+	OutputQuality      string               `json:"output_quality,omitempty"`       // draft | standard | high — controls Pexels source selection + FFmpeg preset/CRF/FPS
 	PreGeneratedScript *ScriptDocument      `json:"pre_generated_script,omitempty"` // Used when script is generated via preview
 	ManualAudioBase64  map[int]string       `json:"manual_audio_base64,omitempty"`  // Base64 audio per segment ID
 	CreatedAt          string               `json:"created_at"`
@@ -52,15 +55,36 @@ func (p *InputPayload) Validate() []string {
 		errs = append(errs, "format must be one of: long, short, both")
 	}
 
+	if p.AspectRatio != "" {
+		validAspects := map[string]bool{"landscape": true, "portrait": true, "square": true}
+		if !validAspects[p.AspectRatio] {
+			errs = append(errs, "aspect_ratio must be one of: landscape, portrait, square")
+		}
+	}
+
+	if p.FitMode != "" {
+		validFit := map[string]bool{"fill": true, "fit": true}
+		if !validFit[p.FitMode] {
+			errs = append(errs, "fit_mode must be one of: fill, fit")
+		}
+	}
+
+	if p.OutputQuality != "" {
+		validQuality := map[string]bool{"draft": true, "standard": true, "high": true}
+		if !validQuality[p.OutputQuality] {
+			errs = append(errs, "output_quality must be one of: draft, standard, high")
+		}
+	}
+
 	if p.Format == "long" || p.Format == "both" {
 		if p.DurationMin < 5 || p.DurationMin > 20 {
 			errs = append(errs, "duration_min must be between 5 and 20 for long-form")
 		}
 	}
 
-	validVoiceModes := map[string]bool{"ai": true, "manual": true, "gcp_tts": true}
+	validVoiceModes := map[string]bool{"ai": true, "manual": true, "gcp_tts": true, "none": true}
 	if !validVoiceModes[p.VoiceoverMode] {
-		errs = append(errs, "voiceover_mode must be one of: ai, manual, gcp_tts")
+		errs = append(errs, "voiceover_mode must be one of: ai, manual, gcp_tts, none")
 	}
 
 	validVoices := map[string]bool{"adam": true, "rachel": true, "domi": true, "josh": true}
@@ -125,6 +149,26 @@ func (p *InputPayload) Validate() []string {
 func (p *InputPayload) SetDefaults() {
 	if p.Format == "" {
 		p.Format = "long"
+	}
+	// Aspect ratio default follows the format unless caller specified otherwise:
+	// shorts are vertical by convention, long-form is landscape.
+	if p.AspectRatio == "" {
+		if p.Format == "short" {
+			p.AspectRatio = "portrait"
+		} else {
+			p.AspectRatio = "landscape"
+		}
+	}
+	// Fit mode default: "fill" (zoom-and-crop) — modern Shorts/TikTok aesthetic.
+	// Users who prefer the original "fit" behavior (letterbox/pillarbox preserving
+	// the entire source frame with black bars) can opt in explicitly.
+	if p.FitMode == "" {
+		p.FitMode = "fill"
+	}
+	// Output quality picks Pexels source resolution + x264 preset/CRF/FPS.
+	// "standard" is the existing behavior (CRF 23, fast, 30fps).
+	if p.OutputQuality == "" {
+		p.OutputQuality = "standard"
 	}
 	if p.DurationMin == 0 {
 		if p.Format == "short" {

@@ -673,19 +673,29 @@ var (
 
 func handleGCPTTSVoices(w http.ResponseWriter, r *http.Request) {
 	apiKey := config.App.GoogleCloudTTSAPIKey
-	if apiKey == "" {
-		http.Error(w, `{"error":"GOOGLE_CLOUD_TTS_API_KEY not configured"}`, http.StatusServiceUnavailable)
+	hasSA := pipeline.HasGCPServiceAccount()
+	if apiKey == "" && !hasSA {
+		http.Error(w, `{"error":"GCP TTS auth not configured — set GOOGLE_CLOUD_TTS_API_KEY (basic voices) and/or GOOGLE_APPLICATION_CREDENTIALS_JSON (premium voices)"}`, http.StatusServiceUnavailable)
 		return
 	}
 
 	lang := r.URL.Query().Get("language")
+	cacheKey := lang
+	if hasSA {
+		cacheKey += "|sa"
+	}
 
-	// Check cache (1 hour TTL, per-language)
+	// Check cache (1 hour TTL, per-language + per-auth-mode)
 	gcpVoiceCacheMu.RLock()
-	if gcpVoiceCache != nil && gcpVoiceCacheLang == lang && time.Since(gcpVoiceCacheTime) < time.Hour {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"voices": gcpVoiceCache})
+	if gcpVoiceCache != nil && gcpVoiceCacheLang == cacheKey && time.Since(gcpVoiceCacheTime) < time.Hour {
+		cached := gcpVoiceCache
 		gcpVoiceCacheMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"voices":                     cached,
+			"service_account_configured": hasSA,
+			"premium_voices_available":   hasSA,
+		})
 		return
 	}
 	gcpVoiceCacheMu.RUnlock()
@@ -697,21 +707,26 @@ func handleGCPTTSVoices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update cache
+	// Update cache (keyed on language + auth mode)
 	gcpVoiceCacheMu.Lock()
 	gcpVoiceCache = voices
-	gcpVoiceCacheLang = lang
+	gcpVoiceCacheLang = cacheKey
 	gcpVoiceCacheTime = time.Now()
 	gcpVoiceCacheMu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"voices": voices})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"voices":                       voices,
+		"service_account_configured":   hasSA,
+		"premium_voices_available":     hasSA,
+	})
 }
 
 func handleGCPTTSSynthesize(w http.ResponseWriter, r *http.Request) {
 	apiKey := config.App.GoogleCloudTTSAPIKey
-	if apiKey == "" {
-		http.Error(w, `{"error":"GOOGLE_CLOUD_TTS_API_KEY not configured"}`, http.StatusServiceUnavailable)
+	hasSA := pipeline.HasGCPServiceAccount()
+	if apiKey == "" && !hasSA {
+		http.Error(w, `{"error":"GCP TTS auth not configured — set GOOGLE_CLOUD_TTS_API_KEY and/or GOOGLE_APPLICATION_CREDENTIALS_JSON"}`, http.StatusServiceUnavailable)
 		return
 	}
 

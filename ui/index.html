@@ -98,6 +98,35 @@
               <input type="range" min="5" max="20" value="8" oninput="state.duration_min=+this.value;document.getElementById('dur-val').textContent='~'+this.value+' min';if(typeof updateVisualsPreview==='function')updateVisualsPreview()">
               <div class="hint" style="font-size:0.78rem;opacity:0.7;margin-top:4px;">Approximate — final length follows the actual narration pace.</div>
             </div>
+
+            <div style="margin-top:18px">
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Aspect Ratio</div>
+              <div class="hints" id="aspect-chips">
+                <span class="hint active" onclick="setAspectRatio('landscape')" data-aspect="landscape">🖥 16:9 Landscape <small style="opacity:0.7;margin-left:4px">YouTube</small></span>
+                <span class="hint" onclick="setAspectRatio('portrait')" data-aspect="portrait">📱 9:16 Portrait <small style="opacity:0.7;margin-left:4px">Shorts / Reels</small></span>
+                <span class="hint" onclick="setAspectRatio('square')" data-aspect="square">⬛ 1:1 Square <small style="opacity:0.7;margin-left:4px">Instagram / Feed</small></span>
+              </div>
+              <div class="hint" style="font-size:0.78rem;opacity:0.7;margin-top:6px;">We auto-pick a sensible default for your format, but you can override it for any platform.</div>
+            </div>
+
+            <div style="margin-top:18px">
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Fit Mode</div>
+              <div class="hints" id="fit-chips">
+                <span class="hint active" onclick="setFitMode('fill')" data-fit="fill">🔲 Fill <small style="opacity:0.7;margin-left:4px">crops edges</small></span>
+                <span class="hint" onclick="setFitMode('fit')" data-fit="fit">🖼 Fit <small style="opacity:0.7;margin-left:4px">letterbox / pillarbox</small></span>
+              </div>
+              <div class="hint" style="font-size:0.78rem;opacity:0.7;margin-top:6px;">Fill zooms-and-crops to cover the whole frame. Fit preserves the entire source with black bars when aspect ratios don't match.</div>
+            </div>
+
+            <div style="margin-top:18px">
+              <div style="font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Output Quality</div>
+              <div class="hints" id="quality-chips">
+                <span class="hint" onclick="setOutputQuality('draft')" data-quality="draft">🚀 Draft <small style="opacity:0.7;margin-left:4px">fast preview, lower quality</small></span>
+                <span class="hint active" onclick="setOutputQuality('standard')" data-quality="standard">⚖️ Standard <small style="opacity:0.7;margin-left:4px">balanced (default)</small></span>
+                <span class="hint" onclick="setOutputQuality('high')" data-quality="high">💎 High <small style="opacity:0.7;margin-left:4px">YouTube-ready, slower</small></span>
+              </div>
+              <div class="hint" style="font-size:0.78rem;opacity:0.7;margin-top:6px;">Higher quality fetches FHD+ stock footage from Pexels and uses a slower x264 preset with a lower CRF for visibly cleaner output. Draft cuts encode time roughly in half for previews.</div>
+            </div>
           </div>
           <div class="wizard-nav">
             <button class="wizard-btn wizard-btn-back" onclick="wizardBack()">← Back</button>
@@ -113,6 +142,20 @@
               <button class="toggle-btn active" onclick="setVoiceMode('ai')">AI Voice</button>
               <button class="toggle-btn" onclick="setVoiceMode('gcp_tts')">Google TTS</button>
               <button class="toggle-btn" onclick="setVoiceMode('manual')">Manual Record</button>
+              <button class="toggle-btn" onclick="setVoiceMode('none')">🎵 Music Only</button>
+            </div>
+
+            <!-- Music-Only (no voice) Info Panel -->
+            <div id="no-voice-panel" class="no-voice-panel" style="display:none;">
+              <div class="no-voice-title">🎵 Music-only video</div>
+              <div class="no-voice-desc">
+                The video will be generated with visuals + background music, no narration. The script is still used to plan visuals and segment timing — segment durations come from the planned script length. Captions are disabled.
+              </div>
+              <ul class="no-voice-bullets">
+                <li>No TTS or recording needed — no API keys required for this mode.</li>
+                <li>Music plays at near-full volume (no voice to duck under).</li>
+                <li>Pick or auto-select a music track in the next step. With "No music" selected, the video will be silent.</li>
+              </ul>
             </div>
             <div class="voice-grid" id="voice-grid">
               <div class="voice-card active" onclick="setVoice('adam')"><div class="name">🎤 Adam</div><div class="info">Deep, authoritative</div></div>
@@ -150,6 +193,10 @@
                   </div>
                 </div>
                 <div id="gcp-voice-info" class="gcp-voice-info" style="display:none;"></div>
+                <div id="gcp-premium-warning" class="gcp-premium-warning">
+                  <strong>★ Premium voice selected</strong> — this voice family (Chirp 3 HD / Studio) requires a Google Cloud service account.
+                  Add <code>GOOGLE_APPLICATION_CREDENTIALS_JSON</code> or <code>GOOGLE_APPLICATION_CREDENTIALS</code> to your <code>.env</code> and restart, or pick a non-premium voice (Standard, Wavenet, Neural2, News, Casual, Polyglot, Chirp HD).
+                </div>
               </div>
               <div id="gcp-tts-preview-container" style="display:none; margin-top: 16px;"></div>
             </div>

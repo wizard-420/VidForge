@@ -9,6 +9,9 @@ const state = {
   raw_input: '',
   input_type: 'category',
   format: 'long',
+  aspect_ratio: 'landscape',
+  fit_mode: 'fill',
+  output_quality: 'standard',
   duration_min: 8,
   voiceover_mode: 'ai',
   voice_id: 'adam',
@@ -128,6 +131,11 @@ function validateWizardStep(step) {
       if (state.voiceover_mode === 'gcp_tts') {
         if (!state.gcp_language_code) return 'Please select a language for Google TTS.';
         if (!state.gcp_voice_name) return 'Please select a voice for Google TTS.';
+        const voices = gcpVoicesCache[state.gcp_language_code] || [];
+        const v = voices.find(x => x.name === state.gcp_voice_name);
+        if (v && v.premium && !gcpServiceAccountConfigured) {
+          return 'Premium voice "' + state.gcp_voice_name + '" requires a Google Cloud service account. Add GOOGLE_APPLICATION_CREDENTIALS_JSON to .env (and restart) or pick a non-premium voice.';
+        }
       }
       break;
     case 4:
@@ -145,8 +153,8 @@ function renderWizardSummary() {
   const items = [
     ['Input', state.raw_input ? (state.raw_input.length > 60 ? state.raw_input.substring(0, 60) + '...' : state.raw_input) : '—'],
     ['Type', state.input_type],
-    ['Format', state.format + (state.format !== 'short' ? ' (' + state.duration_min + ' min)' : '')],
-    ['Voice', state.voiceover_mode === 'ai' ? 'AI — ' + state.voice_id : state.voiceover_mode === 'gcp_tts' ? 'Google TTS — ' + state.gcp_voice_name : 'Manual recording'],
+    ['Format', state.format + (state.format !== 'short' ? ' (' + state.duration_min + ' min)' : '') + ' • ' + (state.aspect_ratio || 'landscape') + ' • ' + (state.fit_mode || 'fill') + ' • ' + (state.output_quality || 'standard') + ' quality'],
+    ['Voice', state.voiceover_mode === 'ai' ? 'AI — ' + state.voice_id : state.voiceover_mode === 'gcp_tts' ? 'Google TTS — ' + state.gcp_voice_name : state.voiceover_mode === 'none' ? '🎵 Music only (no narration)' : 'Manual recording'],
     ['Script', state.pre_generated_script ? 'Approved (' + state.pre_generated_script.segments.length + ' segments)' : 'Will be generated'],
     ['Visuals', `${state.video_style} • 1 / ${state.seconds_per_visual}s` + (state.video_mode === 'manual' ? ' (manual)' : '')],
     ['Music', state.music_mode + (state.music_mode === 'manual' && state.music_url ? ' (track selected)' : '')],
@@ -205,7 +213,39 @@ function setFormat(fmt) {
     c.classList.toggle('active', ['long', 'short', 'both'][i] === fmt);
   });
   document.getElementById('duration-slider').style.display = fmt === 'short' ? 'none' : '';
+
+  // Auto-pick a sensible aspect ratio default for this format. The user can
+  // still override it via the Aspect Ratio chips for any cross-platform use.
+  if (fmt === 'short') {
+    setAspectRatio('portrait');
+  } else {
+    setAspectRatio('landscape');
+  }
   updateVisualsPreview();
+}
+
+// ---- Aspect Ratio ----
+function setAspectRatio(aspect) {
+  state.aspect_ratio = aspect;
+  document.querySelectorAll('#aspect-chips .hint').forEach(c => {
+    c.classList.toggle('active', c.dataset.aspect === aspect);
+  });
+}
+
+// ---- Fit Mode ----
+function setFitMode(mode) {
+  state.fit_mode = mode;
+  document.querySelectorAll('#fit-chips .hint').forEach(c => {
+    c.classList.toggle('active', c.dataset.fit === mode);
+  });
+}
+
+// ---- Output Quality ----
+function setOutputQuality(quality) {
+  state.output_quality = quality;
+  document.querySelectorAll('#quality-chips .hint').forEach(c => {
+    c.classList.toggle('active', c.dataset.quality === quality);
+  });
 }
 
 // ---- Voice ----
@@ -216,8 +256,20 @@ function setVoiceMode(mode) {
   btns[0].classList.toggle('active', mode === 'ai');
   btns[1].classList.toggle('active', mode === 'gcp_tts');
   btns[2].classList.toggle('active', mode === 'manual');
+  if (btns[3]) btns[3].classList.toggle('active', mode === 'none');
+
   document.getElementById('voice-grid').style.display = mode === 'ai' ? 'grid' : 'none';
   document.getElementById('gcp-tts-panel').style.display = mode === 'gcp_tts' ? 'block' : 'none';
+
+  // Music-only info card
+  const noVoicePanel = document.getElementById('no-voice-panel');
+  if (noVoicePanel) noVoicePanel.style.display = mode === 'none' ? 'block' : 'none';
+
+  // Hide manual-recording UI (segment recorders) when not in manual mode —
+  // it's already only shown after script approval, but switching modes mid-flow
+  // shouldn't leave stale recorders visible.
+  const recPanel = document.getElementById('recording-script-container');
+  if (recPanel && mode !== 'manual') recPanel.style.display = 'none';
 
   if (mode === 'gcp_tts' && !state.gcp_language_code) {
     state.gcp_language_code = 'en-US';
@@ -234,6 +286,19 @@ function setVoice(id) {
 
 // ---- Google Cloud TTS ----
 let gcpVoicesCache = {};
+let gcpServiceAccountConfigured = false; // toggled true when /api/gcp-tts/voices reports it
+
+function classifyGCPVoice(name) {
+  if (name.includes('Chirp3-HD')) return { label: 'Chirp 3 HD', premium: true };
+  if (name.includes('Studio')) return { label: 'Studio', premium: true };
+  if (name.includes('Neural2')) return { label: 'Neural2', premium: false };
+  if (name.includes('Wavenet') || name.includes('WaveNet')) return { label: 'WaveNet', premium: false };
+  if (name.includes('Chirp-HD') || name.includes('Chirp')) return { label: 'Chirp HD', premium: false };
+  if (name.includes('News')) return { label: 'News', premium: false };
+  if (name.includes('Casual')) return { label: 'Casual', premium: false };
+  if (name.includes('Polyglot')) return { label: 'Polyglot', premium: false };
+  return { label: 'Standard', premium: false };
+}
 
 async function loadGCPVoices(languageCode) {
   state.gcp_language_code = languageCode;
@@ -257,6 +322,7 @@ async function loadGCPVoices(languageCode) {
     }
     const data = await resp.json();
     gcpVoicesCache[languageCode] = data.voices || [];
+    gcpServiceAccountConfigured = !!data.service_account_configured;
     renderGCPVoiceOptions(gcpVoicesCache[languageCode]);
   } catch (e) {
     voiceSelect.innerHTML = '<option value="">Failed to load voices</option>';
@@ -271,39 +337,58 @@ function renderGCPVoiceOptions(voices) {
   }
 
   const genderIcon = { MALE: '♂', FEMALE: '♀', NEUTRAL: '⚬' };
-  const sorted = [...voices].sort((a, b) => a.name.localeCompare(b.name));
+  // Sort: premium voices first (they're the headline feature when SA is configured),
+  // then alphabetical by name.
+  const sorted = [...voices].sort((a, b) => {
+    const ap = a.premium ? 0 : 1;
+    const bp = b.premium ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return a.name.localeCompare(b.name);
+  });
 
   voiceSelect.innerHTML = '<option value="">— Select a voice —</option>' +
     sorted.map(v => {
       const icon = genderIcon[v.ssmlGender] || '';
-      const type = v.name.includes('Neural2') ? 'Neural2' :
-                   v.name.includes('WaveNet') ? 'WaveNet' :
-                   v.name.includes('Studio') ? 'Studio' :
-                   v.name.includes('Chirp') ? 'Chirp' : 'Standard';
-      return '<option value="' + v.name + '">' + icon + ' ' + v.name + ' (' + type + ')</option>';
+      const cls = classifyGCPVoice(v.name);
+      const star = v.premium ? '★ ' : '';
+      return '<option value="' + v.name + '">' + star + icon + ' ' + v.name + ' (' + cls.label + ')</option>';
     }).join('');
 }
 
 function setGCPVoice(voiceName) {
   state.gcp_voice_name = voiceName;
   const infoEl = document.getElementById('gcp-voice-info');
+  const warnEl = document.getElementById('gcp-premium-warning');
 
   if (!voiceName) {
     infoEl.style.display = 'none';
+    if (warnEl) warnEl.classList.remove('show');
     return;
   }
 
   const voices = gcpVoicesCache[state.gcp_language_code] || [];
   const voice = voices.find(v => v.name === voiceName);
   if (voice) {
-    const type = voice.name.includes('Neural2') ? 'Neural2 (High quality)' :
-                 voice.name.includes('WaveNet') ? 'WaveNet (Natural)' :
-                 voice.name.includes('Studio') ? 'Studio (Premium)' :
-                 voice.name.includes('Chirp') ? 'Chirp HD' : 'Standard';
-    infoEl.innerHTML = '<span class="gcp-voice-badge">' + voice.ssmlGender + '</span> ' +
-      '<span class="gcp-voice-badge">' + type + '</span> ' +
+    const cls = classifyGCPVoice(voice.name);
+    const premiumBadge = voice.premium
+      ? '<span class="gcp-voice-badge gcp-voice-badge-premium" title="Premium voice — requires Google Cloud service account">★ Premium</span> '
+      : '';
+    infoEl.innerHTML = premiumBadge +
+      '<span class="gcp-voice-badge">' + voice.ssmlGender + '</span> ' +
+      '<span class="gcp-voice-badge">' + cls.label + '</span> ' +
       '<span class="gcp-voice-badge">' + voice.naturalSampleRateHertz + ' Hz</span>';
     infoEl.style.display = 'flex';
+
+    // Premium voices only render when SA auth is configured server-side, but
+    // belt-and-suspenders: if a stale cached selection is somehow premium and
+    // SA is not configured, surface the warning so the user picks another.
+    if (warnEl) {
+      if (voice.premium && !gcpServiceAccountConfigured) {
+        warnEl.classList.add('show');
+      } else {
+        warnEl.classList.remove('show');
+      }
+    }
   }
 
   renderGCPTTSPreview();
@@ -586,6 +671,12 @@ async function createJob() {
   if (state.voiceover_mode === 'gcp_tts') {
     if (!state.gcp_voice_name || !state.gcp_language_code) {
       alert('Please select a language and voice for Google Cloud TTS.');
+      return;
+    }
+    const voices = gcpVoicesCache[state.gcp_language_code] || [];
+    const v = voices.find(x => x.name === state.gcp_voice_name);
+    if (v && v.premium && !gcpServiceAccountConfigured) {
+      alert('Premium voice "' + state.gcp_voice_name + '" requires a Google Cloud service account. Add GOOGLE_APPLICATION_CREDENTIALS_JSON to .env (and restart) or pick a non-premium voice.');
       return;
     }
   }
@@ -1078,12 +1169,22 @@ function approveScript() {
   } else {
     const container = document.getElementById('recording-script-container');
     container.style.display = 'block';
-    const modeLabel = state.voiceover_mode === 'gcp_tts' ? 'Google Cloud TTS' : 'ElevenLabs AI';
+    let modeLabel, modeDesc;
+    if (state.voiceover_mode === 'gcp_tts') {
+      modeLabel = 'Google Cloud TTS';
+      modeDesc = `${modeLabel} will generate voiceover using the selected voice. You can now proceed to generate the video.`;
+    } else if (state.voiceover_mode === 'none') {
+      modeLabel = 'Music-only video';
+      modeDesc = 'No narration will be generated. The script is locked in to plan visuals and segment timing. Pick a music track in the next step (or "No music" for a silent video).';
+    } else {
+      modeLabel = 'ElevenLabs AI';
+      modeDesc = `${modeLabel} will generate voiceover using the selected voice. You can now proceed to generate the video.`;
+    }
     container.innerHTML = `
       <div style="padding:16px; background: rgba(52,211,153,0.1); border: 1px solid rgba(52,211,153,0.2); border-radius: 12px; text-align: center;">
         <div style="font-size:24px; margin-bottom:8px;">✅</div>
         <div style="font-weight:600; color:var(--success); margin-bottom:4px;">Script Approved!</div>
-        <div style="font-size:13px; color:var(--text-secondary);">${modeLabel} will generate voiceover using the selected voice. You can now proceed to generate the video.</div>
+        <div style="font-size:13px; color:var(--text-secondary);">${modeDesc}</div>
         <button class="btn btn-primary premium-btn" style="margin-top:12px; padding:6px 16px; font-size:12px;" onclick="resetScript()">Edit Script</button>
       </div>
     `;

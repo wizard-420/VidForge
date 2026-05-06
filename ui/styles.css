@@ -1093,6 +1093,76 @@ select:focus { outline: none; border-color: var(--accent); }
   border: 1px solid rgba(var(--accent-rgb, 99,179,163), 0.25);
 }
 
+.gcp-voice-badge-premium {
+  background: linear-gradient(135deg, rgba(255, 200, 87, 0.18), rgba(255, 159, 64, 0.18));
+  color: #ffc857;
+  border-color: rgba(255, 200, 87, 0.4);
+  font-weight: 600;
+}
+
+.gcp-premium-warning {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(255, 159, 64, 0.08);
+  border: 1px solid rgba(255, 159, 64, 0.25);
+  color: #ffc857;
+  font-size: 13px;
+  line-height: 1.5;
+  display: none;
+}
+
+.gcp-premium-warning.show {
+  display: block;
+}
+
+.gcp-premium-warning code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #ffd98a;
+}
+
+/* Music-only (no voice) info card */
+.no-voice-panel {
+  margin-top: 16px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: linear-gradient(135deg,
+    rgba(var(--accent-rgb, 99,179,163), 0.10),
+    rgba(var(--accent-rgb, 99,179,163), 0.04));
+  border: 1px solid rgba(var(--accent-rgb, 99,179,163), 0.25);
+}
+
+.no-voice-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+
+.no-voice-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin-bottom: 10px;
+}
+
+.no-voice-bullets {
+  margin: 0;
+  padding-left: 18px;
+  list-style: disc;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.no-voice-bullets li::marker {
+  color: var(--accent);
+}
+
 .gcp-preview-title {
   font-size: 12px;
   font-weight: 600;
