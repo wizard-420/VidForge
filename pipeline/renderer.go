@@ -13,6 +13,309 @@ import (
 	"yt-automation-studio/models"
 )
 
+// escapeDrawtext escapes characters that have special meaning inside an
+// FFmpeg drawtext filter's text='...' value (backslash, single quote, colon,
+// percent), and collapses literal newlines to spaces.
+func escapeDrawtext(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "'", `\'`)
+	s = strings.ReplaceAll(s, ":", `\:`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
+// resolveFontFile picks a TTF inside assets/fonts/ that matches the requested
+// family + bold/italic flags. Returns the slash-style path FFmpeg expects, or
+// "" when no usable file is present (caller then omits fontfile= and lets
+// FFmpeg fall back to its built-in font).
+func resolveFontFile(family string, bold, italic bool) string {
+	base := filepath.Join("assets", "fonts")
+	pick := func(name string) string {
+		p := filepath.Join(base, name)
+		if fileExists(p) {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return filepath.ToSlash(p)
+			}
+			return filepath.ToSlash(abs)
+		}
+		return ""
+	}
+
+	fam := strings.ToLower(strings.TrimSpace(family))
+	if fam == "" {
+		fam = "inter"
+	}
+
+	var candidates []string
+	switch fam {
+	case "inter":
+		switch {
+		case bold && italic:
+			candidates = []string{"Inter-BoldItalic.ttf", "Inter-Bold.ttf", "Inter-Regular.ttf"}
+		case bold:
+			candidates = []string{"Inter-Bold.ttf", "Inter-Regular.ttf"}
+		case italic:
+			candidates = []string{"Inter-Italic.ttf", "Inter-Regular.ttf"}
+		default:
+			candidates = []string{"Inter-Regular.ttf"}
+		}
+	case "roboto":
+		switch {
+		case bold && italic:
+			candidates = []string{"Roboto-BoldItalic.ttf", "Roboto-Bold.ttf", "Roboto-Regular.ttf"}
+		case bold:
+			candidates = []string{"Roboto-Bold.ttf", "Roboto-Regular.ttf"}
+		case italic:
+			candidates = []string{"Roboto-Italic.ttf", "Roboto-Regular.ttf"}
+		default:
+			candidates = []string{"Roboto-Regular.ttf"}
+		}
+	case "montserrat":
+		if bold {
+			candidates = []string{"Montserrat-Bold.ttf", "Montserrat-Regular.ttf"}
+		} else {
+			candidates = []string{"Montserrat-Regular.ttf", "Montserrat-Bold.ttf"}
+		}
+	case "playfair", "playfairdisplay":
+		if bold {
+			candidates = []string{"PlayfairDisplay-Bold.ttf", "PlayfairDisplay-Regular.ttf"}
+		} else {
+			candidates = []string{"PlayfairDisplay-Regular.ttf", "PlayfairDisplay-Bold.ttf"}
+		}
+	case "bebas", "bebasneue":
+		candidates = []string{"BebasNeue-Regular.ttf"}
+	default:
+		candidates = []string{"Inter-Regular.ttf"}
+	}
+
+	for _, c := range candidates {
+		if p := pick(c); p != "" {
+			return p
+		}
+	}
+	// Last-resort fallback across all families
+	for _, c := range []string{"Inter-Regular.ttf", "Roboto-Regular.ttf"} {
+		if p := pick(c); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// positionExpr returns FFmpeg x/y expressions for the 9-cell position grid.
+// "tw" / "th" are drawtext intrinsics that resolve to text dimensions at
+// render time, so the same expression works regardless of text length.
+func positionExpr(position string) (string, string) {
+	switch position {
+	case "top-left":
+		return "w*0.05", "h*0.05"
+	case "top-center":
+		return "(w-tw)/2", "h*0.05"
+	case "top-right":
+		return "w-tw-w*0.05", "h*0.05"
+	case "mid-left":
+		return "w*0.05", "(h-th)/2"
+	case "mid-center":
+		return "(w-tw)/2", "(h-th)/2"
+	case "mid-right":
+		return "w-tw-w*0.05", "(h-th)/2"
+	case "bot-left":
+		return "w*0.05", "h-th-h*0.08"
+	case "bot-right":
+		return "w-tw-w*0.05", "h-th-h*0.08"
+	default:
+		return "(w-tw)/2", "h-th-h*0.08" // bot-center
+	}
+}
+
+// buildDrawtextPass assembles a single drawtext= clause. Used for the main
+// text and for each shadow pass. xExpr/yExpr are already-resolved position
+// expressions (possibly with shadow offsets baked in).
+func buildDrawtextPass(safeText, fontFile string, fontSize int, color, xExpr, yExpr string, opts drawtextOptions) string {
+	parts := []string{
+		fmt.Sprintf("text='%s'", safeText),
+		fmt.Sprintf("fontsize=%d", fontSize),
+		fmt.Sprintf("fontcolor=%s", color),
+		fmt.Sprintf("x=%s", xExpr),
+		fmt.Sprintf("y=%s", yExpr),
+	}
+	if fontFile != "" {
+		// drawtext expects a filesystem path — colons (Windows drive letters)
+		// must be escaped because ':' is the filter argument separator.
+		fontFileEsc := strings.ReplaceAll(fontFile, `:`, `\:`)
+		parts = append(parts, fmt.Sprintf("fontfile=%s", fontFileEsc))
+	}
+	if opts.withBorder {
+		parts = append(parts, "borderw=2", "bordercolor=black@0.6")
+	}
+	if opts.boxColor != "" {
+		parts = append(parts,
+			"box=1",
+			fmt.Sprintf("boxcolor=%s", opts.boxColor),
+			"boxborderw=10",
+		)
+	}
+	if opts.fadeIn {
+		parts = append(parts, "alpha='if(lt(t,0.4),t/0.4,1)'")
+	} else if opts.alphaExpr != "" {
+		parts = append(parts, fmt.Sprintf("alpha='%s'", opts.alphaExpr))
+	}
+	return "drawtext=" + strings.Join(parts, ":")
+}
+
+type drawtextOptions struct {
+	withBorder bool   // outline around glyphs (only the main pass)
+	boxColor   string // background box (only the main pass)
+	fadeIn     bool   // animate alpha 0→1 over 0.4s (only the main pass)
+	alphaExpr  string // explicit alpha expression (shadow passes use this)
+}
+
+// drawtextFilter builds an FFmpeg filter chain (one or more drawtext= clauses
+// joined by commas) for a single TextOverlay. Returns "" when the overlay is
+// nil or has empty text. Position is mapped onto a 9-cell grid; font/box and
+// shadow fields fall back to sensible defaults when blank.
+//
+// Layering: shadow passes are emitted FIRST (so they paint under the main
+// text), then the main text pass with outline/border on top.
+func drawtextFilter(overlay *models.TextOverlay, frameW, frameH int) string {
+	if overlay == nil || strings.TrimSpace(overlay.Text) == "" {
+		return ""
+	}
+
+	fontSize := overlay.FontSize
+	if fontSize <= 0 {
+		// Default to ~5% of frame height — looks good across landscape /
+		// portrait without per-aspect tuning.
+		fontSize = frameH / 20
+		if fontSize < 24 {
+			fontSize = 24
+		}
+	}
+	fontColor := overlay.FontColor
+	if fontColor == "" {
+		fontColor = "white"
+	}
+	fontFile := resolveFontFile(overlay.FontFamily, overlay.Bold, overlay.Italic)
+
+	xExpr, yExpr := positionExpr(overlay.Position)
+	safeText := escapeDrawtext(overlay.Text)
+
+	var passes []string
+
+	// Shadow / glow layers — drawn underneath the main text.
+	shadowColor := overlay.ShadowColor
+	wantsGlow := overlay.Glow
+	if wantsGlow && shadowColor == "" {
+		shadowColor = "black@0.7"
+	}
+	if shadowColor != "" {
+		if wantsGlow {
+			// Faux glow: 8 low-alpha copies offset around the text at ~3px
+			// radius. Cheaper than a real blur and renders crisply.
+			glowAlpha := "0.35"
+			offsets := [][2]int{{-3, 0}, {3, 0}, {0, -3}, {0, 3}, {-2, -2}, {2, -2}, {-2, 2}, {2, 2}}
+			for _, off := range offsets {
+				gx := fmt.Sprintf("(%s)+(%d)", xExpr, off[0])
+				gy := fmt.Sprintf("(%s)+(%d)", yExpr, off[1])
+				passes = append(passes, buildDrawtextPass(
+					safeText, fontFile, fontSize, shadowColor, gx, gy,
+					drawtextOptions{alphaExpr: glowAlpha},
+				))
+			}
+		} else {
+			sx := overlay.ShadowX
+			sy := overlay.ShadowY
+			if sx == 0 && sy == 0 {
+				sx, sy = 2, 2
+			}
+			gx := fmt.Sprintf("(%s)+(%d)", xExpr, sx)
+			gy := fmt.Sprintf("(%s)+(%d)", yExpr, sy)
+			alphaExpr := ""
+			if overlay.FadeIn {
+				// Shadow fades in alongside the main text.
+				alphaExpr = "if(lt(t,0.4),t/0.4,1)"
+			}
+			passes = append(passes, buildDrawtextPass(
+				safeText, fontFile, fontSize, shadowColor, gx, gy,
+				drawtextOptions{alphaExpr: alphaExpr},
+			))
+		}
+	}
+
+	// Main text pass — drawn on top of any shadow/glow.
+	passes = append(passes, buildDrawtextPass(
+		safeText, fontFile, fontSize, fontColor, xExpr, yExpr,
+		drawtextOptions{
+			withBorder: true,
+			boxColor:   overlay.BoxColor,
+			fadeIn:     overlay.FadeIn,
+		},
+	))
+
+	return strings.Join(passes, ",")
+}
+
+// BuildOverlayPreview renders a short preview clip of `sourcePath` with the
+// given overlay burnt in. It's used by the per-clip review UI to show what
+// the FFmpeg-rendered text actually looks like before the user saves the
+// overlay to the job. The output is written to `outputPath` at the same
+// resolution as the source.
+//
+// `durationSec` is clamped to at most the source's intrinsic duration; when
+// the source is a still image the preview is generated as a `durationSec`
+// loop at 30fps. Encoded with ultrafast/CRF 28 because pixel-accuracy of the
+// drawtext rendering is the goal, not transcode quality.
+func BuildOverlayPreview(sourcePath string, overlay *models.TextOverlay, frameW, frameH int, durationSec float64, outputPath string) error {
+	if overlay == nil {
+		return fmt.Errorf("overlay is nil")
+	}
+	if durationSec <= 0 {
+		durationSec = 2.0
+	}
+
+	filter := drawtextFilter(overlay, frameW, frameH)
+	if filter == "" {
+		return fmt.Errorf("overlay produced no filter (empty text?)")
+	}
+
+	ext := strings.ToLower(filepath.Ext(sourcePath))
+	isImage := ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp"
+
+	durStr := fmt.Sprintf("%.3f", durationSec)
+	var args []string
+	if isImage {
+		// Still image: loop for the requested duration so the rendered
+		// preview is a tiny video (consistent UI behaviour).
+		args = []string{
+			"-loop", "1", "-i", sourcePath,
+			"-t", durStr,
+			"-vf", filter,
+			"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+			"-pix_fmt", "yuv420p", "-r", "30",
+			"-an", "-y", outputPath,
+		}
+	} else {
+		args = []string{
+			"-i", sourcePath,
+			"-t", durStr,
+			"-vf", filter,
+			"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+			"-pix_fmt", "yuv420p",
+			"-an", "-y", outputPath,
+		}
+	}
+	return runFFmpeg(args)
+}
+
+// ResolveResolution exposes resolveResolution for callers outside the
+// pipeline package (e.g. the API's overlay-preview handler).
+func ResolveResolution(aspect string) (int, int) {
+	w, h, _ := resolveResolution(aspect)
+	return w, h
+}
+
 // resolveResolution maps an aspect ratio name to (width, height, "W:H" string)
 // suitable for FFmpeg scale/pad filters. Defaults to landscape 1920x1080.
 func resolveResolution(aspect string) (int, int, string) {
@@ -145,9 +448,22 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 
 				preparedPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_sub_%02d_prep.mp4", seg.SegmentID, j))
 
+				// Per-clip text overlay (Instagram-stories-style) is opt-in
+				// via the post-Stage-4 review screen. When set, append it
+				// to the video filter chain so it gets burnt in during this
+				// prep pass — by the time we re-encode for segment sync it
+				// is already part of the frame.
+				var overlayFilter string
+				if review := job.GetClipReview(key); review != nil {
+					overlayFilter = drawtextFilter(review.Overlay, width, height)
+				}
+
 				if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
 					frames := int(subClipDuration * float64(profile.FPS))
 					vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=%d", width, height, width, height, frames, width, height, profile.FPS)
+					if overlayFilter != "" {
+						vf = vf + "," + overlayFilter
+					}
 					args := []string{
 						"-loop", "1", "-i", clipPath,
 						"-c:v", "libx264", "-t", fmt.Sprintf("%.3f", subClipDuration),
@@ -166,10 +482,14 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 					// time) so we keep it fast/CRF-23 even in High quality mode —
 					// the profile preset/CRF apply at the master encode passes
 					// below where they matter.
+					vf := scaleFilter
+					if overlayFilter != "" {
+						vf = vf + "," + overlayFilter
+					}
 					args := []string{
 						"-i", clipPath,
 						"-t", fmt.Sprintf("%.3f", subClipDuration),
-						"-vf", scaleFilter,
+						"-vf", vf,
 						"-c:v", "libx264", "-preset", "fast", "-crf", "23",
 						"-pix_fmt", "yuv420p", "-an", "-r", fpsStr,
 						"-y", preparedPath,
@@ -209,15 +529,24 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 			}
 		} else {
 			// ---- Legacy: single clip per segment ----
-			clipPath := job.ClipFiles[fmt.Sprintf("%d", seg.SegmentID)]
+			key := fmt.Sprintf("%d", seg.SegmentID)
+			clipPath := job.ClipFiles[key]
 			if clipPath == "" {
 				continue
+			}
+
+			var overlayFilter string
+			if review := job.GetClipReview(key); review != nil {
+				overlayFilter = drawtextFilter(review.Overlay, width, height)
 			}
 
 			if strings.HasSuffix(clipPath, ".jpg") || strings.HasSuffix(clipPath, ".png") {
 				imgVideoPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_imgvid.mp4", seg.SegmentID))
 				frames := int(segTarget * float64(profile.FPS))
 				vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,zoompan=z='min(zoom+0.0015,1.1)':d=%d:s=%dx%d:fps=%d", width, height, width, height, frames, width, height, profile.FPS)
+				if overlayFilter != "" {
+					vf = vf + "," + overlayFilter
+				}
 				args := []string{
 					"-loop", "1", "-i", clipPath,
 					"-c:v", "libx264", "-t", segTargetStr,
@@ -229,6 +558,24 @@ func RunVideoRenderer(job *models.JobContext, progress ProgressFunc) error {
 					return fmt.Errorf("image to video seg %d: %w", seg.SegmentID, err)
 				}
 				segmentVideoPath = imgVideoPath
+			} else if overlayFilter != "" {
+				// Stock clip with an overlay — pre-bake the drawtext into a
+				// scaled prep file so the segment-sync pass doesn't have to
+				// know about overlays. Without overlay, we keep the existing
+				// fast path of feeding the source straight into segment sync.
+				prepPath := filepath.Join(segDir, fmt.Sprintf("seg_%02d_clip_prep.mp4", seg.SegmentID))
+				vf := scaleFilter + "," + overlayFilter
+				args := []string{
+					"-i", clipPath,
+					"-vf", vf,
+					"-c:v", "libx264", "-preset", "fast", "-crf", "23",
+					"-pix_fmt", "yuv420p", "-an", "-r", fpsStr,
+					"-y", prepPath,
+				}
+				if err := runFFmpeg(args); err != nil {
+					return fmt.Errorf("overlay seg %d: %w", seg.SegmentID, err)
+				}
+				segmentVideoPath = prepPath
 			} else {
 				segmentVideoPath = clipPath
 			}

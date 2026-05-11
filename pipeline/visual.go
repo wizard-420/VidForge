@@ -2,11 +2,13 @@ package pipeline
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +34,12 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 		return fmt.Errorf("create segments directory: %w", err)
 	}
 
+	// Ensure the ClipReview map exists; we populate it as we generate each
+	// visual so the post-Stage-4 review screen has everything it needs.
+	if job.ClipReview == nil {
+		job.ClipReview = make(map[string]*models.ClipReviewItem)
+	}
+
 	if payload.VideoMode == "manual" {
 		progress(models.ProgressEvent{
 			JobID: job.JobID, Stage: 4, StageName: "Visual Fetch",
@@ -40,8 +48,19 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 			Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		})
 		for _, seg := range segments {
+			key := fmt.Sprintf("%d", seg.SegmentID)
 			clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_clip.mp4", seg.SegmentID))
-			job.ClipFiles[fmt.Sprintf("%d", seg.SegmentID)] = clipPath
+			job.ClipFiles[key] = clipPath
+			job.SetClipReview(key, &models.ClipReviewItem{
+				Key:           key,
+				SegmentID:     seg.SegmentID,
+				SubIndex:      -1,
+				FilePath:      clipPath,
+				SourceType:    "clip",
+				Query:         seg.VisualQuery,
+				Description:   seg.VisualCue,
+				NarrationText: seg.Text,
+			})
 		}
 		return nil
 	}
@@ -69,6 +88,9 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 	tracker.targetWidth = targetW
 	log.Printf("🎯 Visual fetch — quality=%s orientation=%s pexels_size=%s min_width=%d target_width=%d",
 		profile.Quality, tracker.orientation, tracker.pexelsSize, tracker.minClipWidth, tracker.targetWidth)
+	// Stash the tracker on the job so per-clip regenerations triggered from
+	// the review UI dedup against the rest of this video's clips.
+	job.SetVisualTracker(tracker)
 	visualsDone := 0
 
 	for _, seg := range segments {
@@ -94,36 +116,24 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 					effectiveType = "clip"
 				case "ai_images":
 					effectiveType = "image"
-				// "mixed" — respect the AI's choice
+					// "mixed" — respect the AI's choice
 				}
 
-				aspect := payload.AspectRatio
-				if effectiveType == "image" {
-					imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
-					if err := generateAIImage(sv.Description, imgPath, payload.ScriptTone, aspect); err != nil {
-						log.Printf("⚠️ AI image failed for seg %d sub %d (%v), falling back to stock", seg.SegmentID, j, err)
-						clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", seg.SegmentID, j))
-						if err2 := fetchPexelsClipTracked(sv.Query, clipPath, tracker); err2 != nil {
-							return fmt.Errorf("visual fetch seg %d sub %d: AI failed (%v), stock failed (%v)", seg.SegmentID, j, err, err2)
-						}
-						job.ClipFiles[key] = clipPath
-					} else {
-						job.ClipFiles[key] = imgPath
-					}
-				} else {
-					// Stock clip
-					clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", seg.SegmentID, j))
-					if err := fetchPexelsClipTracked(sv.Query, clipPath, tracker); err != nil {
-						log.Printf("⚠️ Stock clip failed for seg %d sub %d (%v), trying AI image", seg.SegmentID, j, err)
-						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", seg.SegmentID, j))
-						if err2 := generateAIImage(sv.Description, imgPath, payload.ScriptTone, aspect); err2 != nil {
-							return fmt.Errorf("visual fetch seg %d sub %d: stock failed (%v), AI failed (%v)", seg.SegmentID, j, err, err2)
-						}
-						job.ClipFiles[key] = imgPath
-					} else {
-						job.ClipFiles[key] = clipPath
-					}
+				outPath, srcType, err := fetchOneVisual(jobDir, seg.SegmentID, j, effectiveType, sv.Query, sv.Description, payload, tracker)
+				if err != nil {
+					return fmt.Errorf("visual fetch seg %d sub %d: %w", seg.SegmentID, j, err)
 				}
+				job.ClipFiles[key] = outPath
+				job.SetClipReview(key, &models.ClipReviewItem{
+					Key:           key,
+					SegmentID:     seg.SegmentID,
+					SubIndex:      j,
+					FilePath:      outPath,
+					SourceType:    srcType,
+					Query:         sv.Query,
+					Description:   sv.Description,
+					NarrationText: seg.Text,
+				})
 			}
 		} else {
 			// ---- Legacy fallback: 1 visual per segment ----
@@ -136,10 +146,11 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 				Timestamp:   time.Now().UTC().Format(time.RFC3339),
 			})
 
-			clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_clip.mp4", seg.SegmentID))
 			key := fmt.Sprintf("%d", seg.SegmentID)
+			clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_clip.mp4", seg.SegmentID))
 
 			aspect := payload.AspectRatio
+			srcType := "clip"
 			switch payload.VideoStyle {
 			case "ai_images":
 				imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
@@ -149,6 +160,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 					}
 				} else {
 					clipPath = imgPath
+					srcType = "image"
 				}
 			case "mixed":
 				if seg.SegmentID%2 == 1 {
@@ -156,6 +168,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 						imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", seg.SegmentID))
 						if err2 := generateAIImage(seg.VisualCue, imgPath, payload.ScriptTone, aspect); err2 == nil {
 							clipPath = imgPath
+							srcType = "image"
 						}
 					}
 				} else {
@@ -164,6 +177,7 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 						_ = fetchPexelsClipTracked(seg.VisualQuery, clipPath, tracker)
 					} else {
 						clipPath = imgPath
+						srcType = "image"
 					}
 				}
 			default: // "stock"
@@ -173,6 +187,16 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 			}
 
 			job.ClipFiles[key] = clipPath
+			job.SetClipReview(key, &models.ClipReviewItem{
+				Key:           key,
+				SegmentID:     seg.SegmentID,
+				SubIndex:      -1,
+				FilePath:      clipPath,
+				SourceType:    srcType,
+				Query:         seg.VisualQuery,
+				Description:   seg.VisualCue,
+				NarrationText: seg.Text,
+			})
 		}
 	}
 
@@ -184,6 +208,136 @@ func RunVisualFetcher(job *models.JobContext, progress ProgressFunc) error {
 	})
 
 	return nil
+}
+
+// fetchOneVisual produces a single sub-visual file (image or clip) at a
+// canonical path, with the same fallback chain the original loop used:
+// requested type first, then the other type if it fails. Returns the
+// resulting file path and the actual source type written ("clip" / "image").
+//
+// This helper is reused by RegenerateOneVisual so per-clip regeneration
+// from the review UI gets the same dedup + fallback behavior as the
+// initial fetch.
+func fetchOneVisual(
+	jobDir string, segID, subIdx int,
+	requestedType, query, description string,
+	payload *models.InputPayload,
+	tracker *usedVideoTracker,
+) (string, string, error) {
+	aspect := payload.AspectRatio
+	imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.jpg", segID, subIdx))
+	clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_sub_%02d.mp4", segID, subIdx))
+
+	if requestedType == "image" {
+		if err := generateAIImage(description, imgPath, payload.ScriptTone, aspect); err != nil {
+			log.Printf("⚠️ AI image failed for seg %d sub %d (%v), falling back to stock", segID, subIdx, err)
+			if err2 := fetchPexelsClipTracked(query, clipPath, tracker); err2 != nil {
+				return "", "", fmt.Errorf("AI failed (%v), stock failed (%v)", err, err2)
+			}
+			_ = os.Remove(imgPath) // remove the leftover failed-image placeholder
+			return clipPath, "clip", nil
+		}
+		_ = os.Remove(clipPath) // make sure no stale clip lingers
+		return imgPath, "image", nil
+	}
+
+	// "clip" (or empty) — try stock first
+	if err := fetchPexelsClipTracked(query, clipPath, tracker); err != nil {
+		log.Printf("⚠️ Stock clip failed for seg %d sub %d (%v), trying AI image", segID, subIdx, err)
+		if err2 := generateAIImage(description, imgPath, payload.ScriptTone, aspect); err2 != nil {
+			return "", "", fmt.Errorf("stock failed (%v), AI failed (%v)", err, err2)
+		}
+		_ = os.Remove(clipPath)
+		return imgPath, "image", nil
+	}
+	_ = os.Remove(imgPath)
+	return clipPath, "clip", nil
+}
+
+// RegenerateOneVisual regenerates a single visual identified by key. Used by
+// the review-screen API to refresh a clip the user didn't like. Optionally
+// overrides the search query and/or source type ("clip" | "image"); empty
+// strings keep the existing values.
+//
+// On success the JobContext's ClipFiles, ClipReview, and on-disk file are
+// all updated. The per-job dedup tracker (if present) is reused so the
+// regenerated clip won't duplicate any other visual in the same video.
+func RegenerateOneVisual(job *models.JobContext, key, newQuery, newSourceType string) (*models.ClipReviewItem, error) {
+	item := job.GetClipReview(key)
+	if item == nil {
+		return nil, fmt.Errorf("no review item for key %q", key)
+	}
+	if job.Payload.VideoMode == "manual" {
+		return nil, fmt.Errorf("regeneration not supported in manual video mode")
+	}
+
+	if newQuery != "" {
+		item.Query = newQuery
+	}
+	requestedType := item.SourceType
+	if newSourceType == "clip" || newSourceType == "image" {
+		requestedType = newSourceType
+	}
+
+	jobDir := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", job.JobID), "segments")
+	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		return nil, fmt.Errorf("ensure segments dir: %w", err)
+	}
+
+	// Recover (or rebuild) the per-job dedup tracker. If we're resuming a
+	// long-paused job in a fresh process, the tracker may be nil — rebuild
+	// a minimal one from the current settings so regeneration still works.
+	tracker, _ := job.GetVisualTracker().(*usedVideoTracker)
+	if tracker == nil {
+		profile := ProfileFor(job.Payload.OutputQuality)
+		targetW, _, _ := resolveResolution(job.Payload.AspectRatio)
+		tracker = newVideoTracker()
+		tracker.orientation = pexelsOrientation(job.Payload.AspectRatio)
+		tracker.pexelsSize = profile.PexelsSize
+		tracker.minClipWidth = profile.MinClipWidth
+		tracker.targetWidth = targetW
+		job.SetVisualTracker(tracker)
+	}
+
+	// Use the same canonical filename slot as the original. fetchOneVisual
+	// will overwrite it (and remove the alternate-extension leftover).
+	subIdx := item.SubIndex
+	if subIdx < 0 {
+		// Legacy single-visual segments don't have a sub index. We still
+		// route through fetchOneVisual using subIdx=0 so the file naming
+		// stays consistent — but legacy segments stored at seg_NN_clip.mp4
+		// need their own handling. Fall back to direct stock/AI calls.
+		clipPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_clip.mp4", item.SegmentID))
+		imgPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_img.jpg", item.SegmentID))
+		if requestedType == "image" {
+			if err := generateAIImage(item.Description, imgPath, job.Payload.ScriptTone, job.Payload.AspectRatio); err != nil {
+				return nil, fmt.Errorf("regenerate image: %w", err)
+			}
+			_ = os.Remove(clipPath)
+			item.FilePath = imgPath
+			item.SourceType = "image"
+		} else {
+			if err := fetchPexelsClipTracked(item.Query, clipPath, tracker); err != nil {
+				return nil, fmt.Errorf("regenerate clip: %w", err)
+			}
+			_ = os.Remove(imgPath)
+			item.FilePath = clipPath
+			item.SourceType = "clip"
+		}
+	} else {
+		path, srcType, err := fetchOneVisual(jobDir, item.SegmentID, subIdx, requestedType, item.Query, item.Description, job.Payload, tracker)
+		if err != nil {
+			return nil, err
+		}
+		item.FilePath = path
+		item.SourceType = srcType
+	}
+
+	item.RegenCount++
+	item.Approved = false // regenerating implicitly un-approves; user must re-confirm
+	job.ClipFiles[key] = item.FilePath
+	job.SetClipReview(key, item)
+	return item, nil
 }
 
 // usedVideoTracker tracks used Pexels video IDs and download URLs across a
@@ -508,16 +662,41 @@ func buildAIPrompt(visualCue, tone string) string {
 	return fmt.Sprintf("%s, %s, no text, no watermark, 4K quality, wide angle shot", visualCue, style)
 }
 
-// generateAIImage handles generation with fallback (Together AI -> HuggingFace).
+// generateAIImage handles generation with a three-tier fallback chain:
+//
+//	1. Together AI               — primary, paid FLUX.1-schnell-Free quality
+//	2. Cloudflare Workers AI     — free tier (10k neurons/day ≈ 50–100 imgs)
+//	3. Pollinations.ai           — keyless, last-resort public FLUX endpoint
+//
 // `aspect` is one of "landscape", "portrait", or "square" and selects the
-// generated image dimensions to match the final video orientation.
+// generated image dimensions to match the final video orientation. Cloudflare
+// currently emits ~1024×1024 only, so aspect is honoured best-effort there
+// and downstream FFmpeg crops/resizes as needed.
+//
+// HuggingFace's legacy Inference API for FLUX was removed in 2025/2026, so
+// it's no longer in the chain. Providers without configured credentials are
+// skipped silently rather than counted as failures.
 func generateAIImage(prompt, outputPath, tone, aspect string) error {
-	err := generateTogetherImage(prompt, outputPath, tone, aspect)
-	if err != nil {
-		log.Printf("⚠️ Together AI failed: %v — falling back to HuggingFace", err)
-		return generateHFImage(prompt, outputPath, tone)
+	// Tier 1 — Together AI (skip if not configured).
+	if config.App.TogetherAPIKey != "" {
+		if err := generateTogetherImage(prompt, outputPath, tone, aspect); err == nil {
+			return nil
+		} else {
+			log.Printf("⚠️ Together AI failed: %v — falling back to Cloudflare Workers AI", err)
+		}
 	}
-	return nil
+
+	// Tier 2 — Cloudflare Workers AI (skip if not configured).
+	if config.App.CloudflareAccountID != "" && config.App.CloudflareAPIToken != "" {
+		if err := generateCloudflareImage(prompt, outputPath, tone, aspect); err == nil {
+			return nil
+		} else {
+			log.Printf("⚠️ Cloudflare Workers AI failed: %v — falling back to Pollinations", err)
+		}
+	}
+
+	// Tier 3 — Pollinations.ai (always available, no key required).
+	return generatePollinationsImage(prompt, outputPath, tone, aspect)
 }
 
 // generateTogetherImage uses Together AI's free Flux.1 Schnell endpoint
@@ -590,75 +769,189 @@ func generateTogetherImage(prompt, outputPath, tone, aspect string) error {
 	return downloadFile(imgResp.Data[0].URL, outputPath)
 }
 
-// generateHFImage uses Hugging Face's free Inference API as a fallback
-func generateHFImage(prompt, outputPath, tone string) error {
-	apiKey := config.App.HFAPIKey
-	if apiKey == "" {
-		return fmt.Errorf("HF_API_KEY not configured")
+// generateCloudflareImage uses Cloudflare Workers AI's free FLUX.1-schnell
+// endpoint as the middle tier between paid Together AI and keyless
+// Pollinations. Workers AI gives 10,000 neurons/day on the free plan and
+// FLUX.1-schnell consumes ~100–200 neurons per image, so the budget
+// comfortably covers ~50–100 images/day with no credit card required.
+//
+// API quirk: flux-1-schnell currently outputs at ~1024×1024 only — `aspect`
+// is captured for forward compatibility (Cloudflare has signalled
+// width/height support is coming) but ignored for now. Downstream FFmpeg
+// handles the resize/crop to the final video aspect.
+//
+// Response shape is the Cloudflare wrapper:
+//
+//	{ "result": { "image": "<base64 PNG>" }, "success": bool, "errors": [...] }
+func generateCloudflareImage(prompt, outputPath, tone, aspect string) error {
+	accountID := config.App.CloudflareAccountID
+	apiToken := config.App.CloudflareAPIToken
+	if accountID == "" || apiToken == "" {
+		return fmt.Errorf("CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN not configured")
 	}
+	_ = aspect // see doc comment — reserved for upstream width/height support
 
 	enhancedPrompt := buildAIPrompt(prompt, tone)
-	hfURL := "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+	cfURL := fmt.Sprintf(
+		"https://api.cloudflare.com/client/v4/accounts/%s/ai/run/@cf/black-forest-labs/flux-1-schnell",
+		accountID,
+	)
 
 	reqBody := map[string]interface{}{
-		"inputs": enhancedPrompt,
+		"prompt": enhancedPrompt,
+		"steps":  4, // 4 hits the sweet spot for FLUX.1-schnell (max 8 on free tier)
 	}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	retries := 3
+	req, err := http.NewRequest("POST", cfURL, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Cloudflare AI request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Cloudflare AI returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var cfResp struct {
+		Result struct {
+			Image string `json:"image"`
+		} `json:"result"`
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cfResp); err != nil {
+		return fmt.Errorf("parse Cloudflare response: %w", err)
+	}
+	if !cfResp.Success {
+		msg := "unknown error"
+		if len(cfResp.Errors) > 0 {
+			msg = cfResp.Errors[0].Message
+		}
+		return fmt.Errorf("Cloudflare AI error: %s", msg)
+	}
+	if cfResp.Result.Image == "" {
+		return fmt.Errorf("Cloudflare returned empty image payload")
+	}
+
+	imgBytes, err := base64.StdEncoding.DecodeString(cfResp.Result.Image)
+	if err != nil {
+		return fmt.Errorf("decode Cloudflare image: %w", err)
+	}
+	if err := os.WriteFile(outputPath, imgBytes, 0644); err != nil {
+		return fmt.Errorf("save Cloudflare image: %w", err)
+	}
+
+	if info, err := os.Stat(outputPath); err == nil && info.Size() < 5*1024 {
+		return fmt.Errorf("Cloudflare returned suspiciously small image (%d bytes)", info.Size())
+	}
+	return nil
+}
+
+// generatePollinationsImage uses Pollinations.ai's free public FLUX endpoint
+// as the AI image fallback. The API is keyless: a simple GET request to
+// https://image.pollinations.ai/prompt/<encoded prompt>?width=W&height=H&model=flux
+// streams back JPEG bytes directly. We pass nologo=true so the result is
+// clean for monetised YouTube content, and use the same buildAIPrompt() the
+// Together AI path uses so the artistic style stays consistent across
+// providers.
+//
+// Retries handle the occasional cold-start / 502 the public endpoint
+// produces under load. A small sanity check rejects suspiciously tiny
+// payloads (placeholder images returned when the upstream service is
+// degraded).
+func generatePollinationsImage(prompt, outputPath, tone, aspect string) error {
+	width, height := pollinationsDimensionsFor(aspect)
+	enhancedPrompt := buildAIPrompt(prompt, tone)
+
+	// Pollinations encodes the prompt in the path — must escape it.
+	pollURL := fmt.Sprintf(
+		"https://image.pollinations.ai/prompt/%s?width=%d&height=%d&model=flux&nologo=true&enhance=false",
+		url.PathEscape(enhancedPrompt), width, height,
+	)
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	const retries = 3
 
 	for attempt := 1; attempt <= retries; attempt++ {
-		req, err := http.NewRequest("POST", hfURL, bytes.NewReader(jsonBody))
+		req, err := http.NewRequest("GET", pollURL, nil)
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("User-Agent", "VidForge/1.0")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("⚠️ HF request failed attempt %d: %v", attempt, err)
-			time.Sleep(10 * time.Second)
+			log.Printf("⚠️ Pollinations request failed (attempt %d/%d): %v", attempt, retries, err)
+			time.Sleep(time.Duration(5*attempt) * time.Second)
 			continue
 		}
-		
-		if resp.StatusCode == 503 {
-			// Model is loading
+
+		if resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 {
+			// Cold start / overloaded upstream — back off and retry.
 			resp.Body.Close()
-			wait := time.Duration(20*attempt) * time.Second
-			log.Printf("⚠️ HF model loading, waiting %v (attempt %d/%d)", wait, attempt, retries)
+			wait := time.Duration(10*attempt) * time.Second
+			log.Printf("⚠️ Pollinations %d (attempt %d/%d), waiting %v", resp.StatusCode, attempt, retries, wait)
 			time.Sleep(wait)
 			continue
 		}
-		
+
 		if resp.StatusCode != 200 {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return fmt.Errorf("HF API returned %d: %s", resp.StatusCode, string(body))
+			return fmt.Errorf("Pollinations API returned %d: %s", resp.StatusCode, string(body))
 		}
 
-		// HF returns raw image bytes directly
-		outFile, err := os.Create(outputPath)
+		out, err := os.Create(outputPath)
 		if err != nil {
 			resp.Body.Close()
-			return fmt.Errorf("create file: %w", err)
+			return fmt.Errorf("create output file: %w", err)
 		}
-		
-		_, err = io.Copy(outFile, resp.Body)
-		outFile.Close()
+		_, copyErr := io.Copy(out, resp.Body)
+		out.Close()
 		resp.Body.Close()
-		
-		if err != nil {
-			return fmt.Errorf("save HF image: %w", err)
+		if copyErr != nil {
+			return fmt.Errorf("save Pollinations image: %w", copyErr)
+		}
+
+		// Sanity check: anything under ~5 KB is almost certainly a placeholder
+		// or HTML error page that slipped through with status 200.
+		if info, err := os.Stat(outputPath); err == nil && info.Size() < 5*1024 {
+			return fmt.Errorf("Pollinations returned suspiciously small image (%d bytes)", info.Size())
 		}
 		return nil
 	}
 
-	return fmt.Errorf("HuggingFace failed after %d retries", retries)
+	return fmt.Errorf("Pollinations failed after %d retries", retries)
+}
+
+// pollinationsDimensionsFor returns image dimensions matching the requested
+// aspect ratio. Pollinations is more forgiving than Together AI about exact
+// pixel counts but we keep the same proportions so swapping providers
+// doesn't change perceived framing.
+func pollinationsDimensionsFor(aspect string) (int, int) {
+	switch aspect {
+	case "portrait":
+		return 1024, 1792
+	case "square":
+		return 1280, 1280
+	default: // landscape
+		return 1792, 1024
+	}
 }
 
 // downloadFile downloads a file from URL to local path

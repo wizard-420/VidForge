@@ -166,6 +166,30 @@
 
             <!-- Google Cloud TTS Panel -->
             <div id="gcp-tts-panel" style="display:none; margin-top: 16px;">
+              <!-- Voice recommendation banner (appears when a script is available) -->
+              <div id="gcp-voice-rec-banner" class="rec-banner" style="display:none;">
+                <div class="rec-banner-head">
+                  <div class="rec-banner-icon">✨</div>
+                  <div class="rec-banner-titles">
+                    <div class="rec-banner-title">Recommended for your script</div>
+                    <div class="rec-banner-subtitle">
+                      <span id="gcp-rec-character">…</span>
+                      <span class="rec-banner-dot">·</span>
+                      <span id="gcp-rec-gender">…</span>
+                    </div>
+                  </div>
+                  <button class="rec-banner-dismiss" type="button" onclick="dismissVoiceRecommendation()" title="Dismiss">×</button>
+                </div>
+                <div id="gcp-rec-voices" class="rec-chip-row"></div>
+                <div id="gcp-rec-reason" class="rec-banner-reason"></div>
+                <div id="gcp-rec-note" class="rec-banner-note" style="display:none;"></div>
+              </div>
+
+              <!-- Passive hint shown when no script is available yet -->
+              <div id="gcp-voice-rec-empty" class="rec-empty" style="display:none;">
+                💡 Generate a script first and we'll suggest a voice that fits the tone.
+              </div>
+
               <div class="gcp-tts-config">
                 <div class="gcp-tts-row">
                   <div class="gcp-tts-field">
@@ -265,6 +289,16 @@
               <div id="visuals-preview" style="font-size:12px;color:var(--text-muted);margin-top:14px;padding:10px 12px;background:rgba(111,184,160,0.06);border:1px solid var(--glass-border);border-radius:8px;">
                 ≈ 80 visuals across your 8-min video — one new shot every 6 seconds.
               </div>
+
+              <div style="margin-top:18px;padding:12px 14px;background:rgba(0,0,0,0.18);border:1px solid var(--glass-border);border-radius:10px;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                  <input type="checkbox" id="review-clips-chk" checked onchange="state.skip_visual_review=!this.checked">
+                  <span style="font-weight:600;font-size:13px;">🎬 Pause to review each clip before render</span>
+                </label>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:6px;margin-left:26px;">
+                  After visuals are fetched, the pipeline will pause so you can preview each clip, regenerate the ones you don't like, and add Instagram-style text overlays. Uncheck for the classic fire-and-forget flow.
+                </div>
+              </div>
             </div>
           </div>
           <div class="wizard-nav">
@@ -279,6 +313,7 @@
             <div class="card-title">🎵 Music</div>
             <div class="toggle-group" style="margin-bottom:12px">
               <button class="toggle-btn active" onclick="setMusicMode('auto')">Auto Music</button>
+              <button class="toggle-btn" onclick="setMusicMode('ai_generated')">✨ AI Generate</button>
               <button class="toggle-btn" onclick="setMusicMode('manual')">Manual Search</button>
               <button class="toggle-btn" onclick="setMusicMode('skip')">No Music</button>
             </div>
@@ -296,18 +331,210 @@
               <div id="auto-music-desc" class="auto-music-desc">Auto music will match: <strong>cinematic dramatic epic</strong></div>
             </div>
 
-            <div id="manual-music-section" class="premium-glass-panel" style="display:none;">
-              <label class="premium-label">Jamendo Music Search</label>
-              <div class="search-container">
-                <div class="search-input-wrapper">
-                  <span class="search-icon">🔍</span>
-                  <input type="text" id="jamendo-search" class="premium-input" placeholder="Search keywords, genres..." onkeypress="if(event.key === 'Enter') searchJamendo()">
+            <!-- AI Music Generation -->
+            <div id="ai-music-section" class="premium-glass-panel" style="display:none;">
+              <label class="premium-label">✨ Vibe Preset</label>
+              <div class="vibe-preset-grid" id="vibe-preset-grid">
+                <button class="vibe-preset-card active" data-preset="peaceful_aesthetic" onclick="setMusicPreset('peaceful_aesthetic')">
+                  <div class="vibe-preset-emoji">🌅</div>
+                  <div class="vibe-preset-title">Peaceful Aesthetic</div>
+                  <div class="vibe-preset-sub">Soft piano + birds + airy pads</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="cinematic_drama" onclick="setMusicPreset('cinematic_drama')">
+                  <div class="vibe-preset-emoji">🎬</div>
+                  <div class="vibe-preset-title">Cinematic Drama</div>
+                  <div class="vibe-preset-sub">Epic orchestral, sweeping strings</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="lofi_study" onclick="setMusicPreset('lofi_study')">
+                  <div class="vibe-preset-emoji">📚</div>
+                  <div class="vibe-preset-title">Lo-fi Study</div>
+                  <div class="vibe-preset-sub">Chill beat + vinyl + Rhodes piano</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="sunrise_vlog" onclick="setMusicPreset('sunrise_vlog')">
+                  <div class="vibe-preset-emoji">✨</div>
+                  <div class="vibe-preset-title">Sunrise Vlog</div>
+                  <div class="vibe-preset-sub">Warm acoustic + soft strings</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="asmr_calm" onclick="setMusicPreset('asmr_calm')">
+                  <div class="vibe-preset-emoji">🌊</div>
+                  <div class="vibe-preset-title">ASMR Calm</div>
+                  <div class="vibe-preset-sub">Ambient drone + waves + rain</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="tech_futuristic" onclick="setMusicPreset('tech_futuristic')">
+                  <div class="vibe-preset-emoji">🚀</div>
+                  <div class="vibe-preset-title">Tech Futuristic</div>
+                  <div class="vibe-preset-sub">Synth pads + electronic pulse</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="mysterious" onclick="setMusicPreset('mysterious')">
+                  <div class="vibe-preset-emoji">🔍</div>
+                  <div class="vibe-preset-title">Mysterious</div>
+                  <div class="vibe-preset-sub">Dark ambient + drones + tension</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="motivational" onclick="setMusicPreset('motivational')">
+                  <div class="vibe-preset-emoji">💪</div>
+                  <div class="vibe-preset-title">Motivational</div>
+                  <div class="vibe-preset-sub">Driving drums + anthemic strings</div>
+                </button>
+                <button class="vibe-preset-card" data-preset="custom" onclick="setMusicPreset('custom')">
+                  <div class="vibe-preset-emoji">✏️</div>
+                  <div class="vibe-preset-title">Custom Prompt</div>
+                  <div class="vibe-preset-sub">Write your own vibe</div>
+                </button>
+              </div>
+
+              <details class="ai-music-advanced">
+                <summary>Advanced — fine-tune the prompt &amp; ambience</summary>
+                <div class="ai-music-advanced-body">
+                  <div class="form-group" style="margin-top:12px">
+                    <label class="premium-label">Prompt (sent to AI music model)</label>
+                    <textarea id="ai-music-prompt" class="premium-input" rows="3" placeholder="e.g. Calm cinematic nature ambience, soft piano, airy vocal pad, peaceful sunrise mood, slow 70 BPM" oninput="onAIMusicPromptInput(this.value)"></textarea>
+                  </div>
+
+                  <div class="form-group" style="margin-top:12px">
+                    <label class="premium-label">Ambience Layers (mixed under the music)</label>
+                    <div class="ambience-chip-row" id="ambience-chip-row">
+                      <button class="ambience-chip" data-ambience="birds" onclick="toggleAmbience('birds')">🐦 Birds</button>
+                      <button class="ambience-chip" data-ambience="rain" onclick="toggleAmbience('rain')">🌧️ Rain</button>
+                      <button class="ambience-chip" data-ambience="wind" onclick="toggleAmbience('wind')">💨 Wind</button>
+                      <button class="ambience-chip" data-ambience="waves" onclick="toggleAmbience('waves')">🌊 Waves</button>
+                      <button class="ambience-chip" data-ambience="fire" onclick="toggleAmbience('fire')">🔥 Fire</button>
+                      <button class="ambience-chip" data-ambience="crowd" onclick="toggleAmbience('crowd')">👥 Crowd</button>
+                      <button class="ambience-chip" data-ambience="vinyl" onclick="toggleAmbience('vinyl')">📀 Vinyl</button>
+                    </div>
+                  </div>
+
+                  <div class="form-group" style="margin-top:12px">
+                    <label class="premium-label">Provider</label>
+                    <select id="ai-music-provider" class="premium-input" style="padding-left:14px" onchange="setAIMusicProvider(this.value)">
+                      <option value="auto">Auto (try MusicGen → Stable Audio → Jamendo)</option>
+                      <option value="huggingface_musicgen">HuggingFace MusicGen (broader instrumentation)</option>
+                      <option value="huggingface_stable_audio">HuggingFace Stable Audio Open (cinematic/ambient)</option>
+                      <option value="jamendo">Jamendo only (curated library, no AI)</option>
+                    </select>
+                  </div>
                 </div>
-                <button class="btn btn-primary premium-btn" onclick="searchJamendo()">Search</button>
+              </details>
+
+              <div class="ai-music-prompt-preview" id="ai-music-prompt-preview">
+                <span class="ai-music-prompt-label">Final prompt:</span>
+                <span class="ai-music-prompt-value" id="ai-music-prompt-value"></span>
               </div>
-              <div id="jamendo-results" class="jamendo-results-container">
-                <div class="empty-state">Search to find tracks.</div>
+
+              <div class="ai-music-warning">
+                ⏳ AI generation typically takes 30-90 seconds. Generate a preview first to hear the vibe — you can regenerate as many times as you like before submitting the job.
               </div>
+
+              <div class="ai-music-actions">
+                <button id="btn-ai-music-preview" class="btn btn-primary premium-btn" onclick="generateAIMusicPreview(false)">
+                  🎵 Generate Preview
+                </button>
+                <span id="ai-music-status" class="ai-music-status"></span>
+              </div>
+
+              <!-- Generated preview track: audio player + crop + regenerate -->
+              <div id="ai-music-track-panel" class="selected-track-panel" style="display:none; margin-top:14px;">
+                <div class="selected-track-header">
+                  <div class="selected-track-title">
+                    AI Track Ready <span id="ai-music-provider-badge" class="provider-badge"></span>
+                  </div>
+                  <button class="btn btn-icon btn-icon-wide" onclick="generateAIMusicPreview(true)" title="Generate a different variation">🔄 Regenerate</button>
+                </div>
+                <audio id="ai-music-audio" class="premium-audio" controls></audio>
+                <div class="form-row">
+                  <div class="slider-group" style="flex: 1;">
+                    <label>Crop Start (sec) <span id="ai-music-start-val">0</span></label>
+                    <input type="range" id="ai-music-start-slider" min="0" max="30" value="0" oninput="updateAIMusicCrop(this.id)">
+                  </div>
+                  <div class="slider-group" style="flex: 1;">
+                    <label>Crop End (sec) <span id="ai-music-end-val">30</span></label>
+                    <input type="range" id="ai-music-end-slider" min="1" max="30" value="30" oninput="updateAIMusicCrop(this.id)">
+                  </div>
+                </div>
+                <div class="ai-music-track-hint">
+                  This 30-second preview will loop in the final video. Crop here only if you want to skip an intro or fade-out section.
+                </div>
+              </div>
+            </div>
+
+            <div id="manual-music-section" class="premium-glass-panel" style="display:none;">
+              <div class="toggle-group manual-music-source-tabs" style="margin-bottom:14px">
+                <button class="toggle-btn active" onclick="setManualMusicSource('jamendo')">🔍 Search Jamendo</button>
+                <button class="toggle-btn" onclick="setManualMusicSource('url')">🔗 Paste URL</button>
+                <button class="toggle-btn" onclick="setManualMusicSource('upload')">📁 Upload File</button>
+              </div>
+
+              <!-- Source: Jamendo search -->
+              <div id="manual-source-jamendo">
+                <!-- Music recommendation banner -->
+                <div id="music-rec-banner" class="rec-banner" style="display:none;">
+                  <div class="rec-banner-head">
+                    <div class="rec-banner-icon">✨</div>
+                    <div class="rec-banner-titles">
+                      <div class="rec-banner-title">Suggested for your script</div>
+                      <div class="rec-banner-subtitle" id="music-rec-mood-summary">…</div>
+                    </div>
+                    <button class="rec-banner-dismiss" type="button" onclick="dismissMusicRecommendation()" title="Dismiss">×</button>
+                  </div>
+                  <div id="music-rec-chips" class="rec-chip-row"></div>
+                  <details class="rec-banner-explain" id="music-rec-explain-wrap" style="display:none;">
+                    <summary>Why these?</summary>
+                    <p id="music-rec-reason"></p>
+                    <div id="music-rec-avoid-wrap" class="rec-avoid" style="display:none;">
+                      <span class="rec-avoid-label">Avoid:</span>
+                      <span id="music-rec-avoid"></span>
+                    </div>
+                  </details>
+                </div>
+                <div id="music-rec-empty" class="rec-empty" style="display:none;">
+                  💡 Generate a script first and we'll suggest matching music searches.
+                </div>
+
+                <label class="premium-label">Jamendo Music Search</label>
+                <div class="search-container">
+                  <div class="search-input-wrapper">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="jamendo-search" class="premium-input" placeholder="Search keywords, genres..." onkeypress="if(event.key === 'Enter') searchJamendo()">
+                  </div>
+                  <button class="btn btn-primary premium-btn" onclick="searchJamendo()">Search</button>
+                </div>
+                <div id="jamendo-results" class="jamendo-results-container">
+                  <div class="empty-state">Search to find tracks.</div>
+                </div>
+              </div>
+
+              <!-- Source: Direct URL -->
+              <div id="manual-source-url" style="display:none;">
+                <label class="premium-label">Direct Audio URL</label>
+                <div class="search-container">
+                  <div class="search-input-wrapper">
+                    <span class="search-icon">🔗</span>
+                    <input type="url" id="manual-music-url" class="premium-input" placeholder="https://example.com/song.mp3" oninput="onManualUrlInput(this.value)">
+                  </div>
+                </div>
+                <div class="manual-source-hint">
+                  Paste a direct download link to an audio file (MP3, WAV, M4A, OGG). The track will be re-encoded to MP3 by the pipeline.
+                </div>
+              </div>
+
+              <!-- Source: File upload -->
+              <div id="manual-source-upload" style="display:none;">
+                <label class="premium-label">Upload Audio File</label>
+                <label for="manual-music-file" class="upload-dropzone" id="manual-music-dropzone">
+                  <div class="upload-dropzone-icon">📁</div>
+                  <div class="upload-dropzone-title">Click to choose an audio file</div>
+                  <div class="upload-dropzone-subtitle">MP3, WAV, M4A, OGG, FLAC — kept locally, sent only when you generate the video.</div>
+                </label>
+                <input type="file" id="manual-music-file" accept="audio/*" style="display:none" onchange="handleMusicFileUpload(this)">
+                <div id="manual-uploaded-info" class="uploaded-file-info" style="display:none;">
+                  <div class="uploaded-file-row">
+                    <span class="uploaded-file-name" id="manual-uploaded-name"></span>
+                    <span class="uploaded-file-meta" id="manual-uploaded-meta"></span>
+                    <button class="btn btn-icon" onclick="clearUploadedMusic()" title="Remove">✕</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Shared selected-track preview + crop sliders (used by all 3 sources) -->
               <div id="selected-track-ui" class="selected-track-panel" style="display: none;">
                 <div class="selected-track-header">
                   <div class="selected-track-title">Selected Track: <span id="selected-track-name"></span></div>
@@ -403,6 +630,163 @@
             <li class="pipeline-step waiting" data-stage="6"><div class="step-icon">6</div><div class="step-info"><div class="step-name">Video Render</div><div class="step-msg">Waiting...</div></div></li>
             <li class="pipeline-step waiting" data-stage="7"><div class="step-icon">7</div><div class="step-info"><div class="step-name">Upload</div><div class="step-msg">Waiting...</div></div></li>
           </ul>
+
+          <!-- Per-Clip Visual Review Panel (Stage 4 pause) -->
+          <div id="visual-review-panel" style="display:none; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--glass-border);">
+            <div class="visual-review-header">
+              <div>
+                <div style="font-weight:600;color:var(--accent);font-size:1.05rem">🎬 Review Generated Visuals</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
+                  Preview each clip below. Regenerate any you don't like, or add Instagram-style text overlays. Click "Continue" when ready to render.
+                </div>
+              </div>
+              <div class="visual-review-summary">
+                <span id="visual-review-count">0</span> clips
+              </div>
+            </div>
+
+            <div id="visual-review-grid" class="visual-review-grid"></div>
+
+            <div class="visual-review-footer">
+              <button class="toggle-btn" onclick="reloadVisualReview()" id="btn-reload-visuals" type="button">🔄 Refresh</button>
+              <button class="btn-generate" id="btn-approve-visuals" onclick="approveAllVisuals()">✅ Continue to Render →</button>
+            </div>
+          </div>
+
+          <!-- Text Overlay Editor Modal -->
+          <div id="overlay-editor-backdrop" class="overlay-editor-backdrop" style="display:none;" onclick="closeOverlayEditor(event)">
+            <div class="overlay-editor overlay-editor--wide" onclick="event.stopPropagation()">
+              <div class="overlay-editor-header">
+                <div class="overlay-editor-title">✏️ Add Text to Clip</div>
+                <button class="overlay-editor-close" onclick="closeOverlayEditor()">×</button>
+              </div>
+              <div class="overlay-editor-body overlay-editor-body--with-preview">
+
+                <!-- Live preview pane -->
+                <div class="overlay-preview-pane">
+                  <div class="overlay-preview-frame" id="overlay-preview-frame">
+                    <video id="overlay-preview-video" muted loop playsinline preload="metadata" style="display:none;"></video>
+                    <img id="overlay-preview-image" style="display:none;" alt="clip preview">
+                    <div class="overlay-preview-textbox" id="overlay-preview-textbox"></div>
+                  </div>
+                  <div class="overlay-preview-hint">
+                    Live preview — drag controls to see changes. Click "Render real preview" to confirm exact FFmpeg output.
+                  </div>
+                  <button class="toggle-btn overlay-preview-render-btn" type="button" id="btn-overlay-server-preview" onclick="renderServerOverlayPreview()">
+                    🎬 Render real preview
+                  </button>
+                </div>
+
+                <!-- Controls pane -->
+                <div class="overlay-controls-pane">
+                  <div class="form-group">
+                    <label class="premium-label">Text</label>
+                    <input type="text" id="overlay-text" class="premium-input" placeholder="e.g. Mt. Everest, 8,848 m" maxlength="120">
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-group" style="flex:1">
+                      <label class="premium-label">Position</label>
+                      <div class="overlay-position-grid" id="overlay-position-grid">
+                        <button type="button" class="overlay-pos-cell" data-pos="top-left">↖</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="top-center">↑</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="top-right">↗</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="mid-left">←</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="mid-center">●</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="mid-right">→</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="bot-left">↙</button>
+                        <button type="button" class="overlay-pos-cell active" data-pos="bot-center">↓</button>
+                        <button type="button" class="overlay-pos-cell" data-pos="bot-right">↘</button>
+                      </div>
+                    </div>
+                    <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:14px">
+                      <div>
+                        <label class="premium-label">Font Size <span id="overlay-size-val">48</span>px</label>
+                        <input type="range" id="overlay-size" min="20" max="120" value="48">
+                      </div>
+                      <div>
+                        <label class="premium-label">Color</label>
+                        <input type="color" id="overlay-color" value="#ffffff" style="width:100%;height:36px;border-radius:6px;border:1px solid var(--glass-border);background:transparent;cursor:pointer;">
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-group" style="flex:1">
+                      <label class="premium-label">Font Family</label>
+                      <select id="overlay-font" class="premium-input" style="padding-left:14px;">
+                        <option value="Inter">Inter — modern sans</option>
+                        <option value="Roboto">Roboto — clean sans</option>
+                        <option value="Montserrat">Montserrat — geometric bold</option>
+                        <option value="PlayfairDisplay">Playfair — elegant serif</option>
+                        <option value="Bebas">Bebas Neue — impact display</option>
+                      </select>
+                    </div>
+                    <div class="form-group" style="flex:1">
+                      <label class="premium-label">Style</label>
+                      <div class="overlay-style-row">
+                        <label class="overlay-style-chip" title="Bold">
+                          <input type="checkbox" id="overlay-bold">
+                          <span><strong>B</strong></span>
+                        </label>
+                        <label class="overlay-style-chip" title="Italic">
+                          <input type="checkbox" id="overlay-italic">
+                          <span><em>I</em></span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+
+                  <details class="overlay-shadow-group" open>
+                    <summary>Shadow &amp; Glow</summary>
+                    <div class="form-row" style="margin-top:10px">
+                      <div class="form-group" style="flex:1">
+                        <label class="premium-label">Style</label>
+                        <select id="overlay-shadow-preset" class="premium-input" style="padding-left:14px;">
+                          <option value="none">None</option>
+                          <option value="soft" selected>Soft drop (default)</option>
+                          <option value="hard">Hard drop</option>
+                          <option value="long">Long drop</option>
+                          <option value="glow">Glow halo</option>
+                          <option value="custom">Custom…</option>
+                        </select>
+                      </div>
+                      <div class="form-group" style="flex:1">
+                        <label class="premium-label">Shadow Color</label>
+                        <input type="color" id="overlay-shadow-color" value="#000000" style="width:100%;height:36px;border-radius:6px;border:1px solid var(--glass-border);background:transparent;cursor:pointer;">
+                      </div>
+                    </div>
+                    <div class="form-row" id="overlay-shadow-custom" style="display:none;">
+                      <div class="slider-group" style="flex:1">
+                        <label>X offset <span id="overlay-shadow-x-val">2</span>px</label>
+                        <input type="range" id="overlay-shadow-x" min="-20" max="20" value="2">
+                      </div>
+                      <div class="slider-group" style="flex:1">
+                        <label>Y offset <span id="overlay-shadow-y-val">2</span>px</label>
+                        <input type="range" id="overlay-shadow-y" min="-20" max="20" value="2">
+                      </div>
+                    </div>
+                  </details>
+
+                  <div class="overlay-toggles">
+                    <label class="overlay-toggle">
+                      <input type="checkbox" id="overlay-box">
+                      <span>Black background box</span>
+                    </label>
+                    <label class="overlay-toggle">
+                      <input type="checkbox" id="overlay-fade" checked>
+                      <span>Fade-in animation</span>
+                    </label>
+                  </div>
+                </div>
+
+              </div>
+              <div class="overlay-editor-footer">
+                <button class="toggle-btn" onclick="clearOverlay()">🗑 Remove</button>
+                <button class="btn-generate" onclick="saveOverlay()">Save Overlay</button>
+              </div>
+            </div>
+          </div>
 
           <div id="approval-panel" style="display:none; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--glass-border);">
             <div style="font-weight:600;margin-bottom:12px;color:var(--accent)">👀 Video Ready for Review</div>

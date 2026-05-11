@@ -22,6 +22,13 @@ type Config struct {
 	HFAPIKey             string
 	JamendoClientID      string
 
+	// Cloudflare Workers AI — free tier (10,000 neurons/day) is used as the
+	// FLUX image-generation fallback between Together AI (paid quality) and
+	// Pollinations.ai (last-resort). Requires BOTH the account ID and an
+	// API token with "Workers AI" read permission.
+	CloudflareAccountID string
+	CloudflareAPIToken  string
+
 	// Google Cloud Service Account (for premium TTS voices like Chirp 3 HD,
 	// Studio). Either may be set; JSON env var takes precedence over file path.
 	// When neither is set, GCP TTS falls back to API-key auth which only
@@ -62,6 +69,9 @@ func Load() {
 		HFAPIKey:         getEnv("HF_API_KEY", ""),
 		JamendoClientID:  getEnv("JAMENDO_CLIENT_ID", "b6747d04"), // default if empty
 
+		CloudflareAccountID: getEnv("CLOUDFLARE_ACCOUNT_ID", ""),
+		CloudflareAPIToken:  getEnv("CLOUDFLARE_API_TOKEN", ""),
+
 		GoogleApplicationCredentialsJSON: getEnv("GOOGLE_APPLICATION_CREDENTIALS_JSON", ""),
 		GoogleApplicationCredentialsFile: getEnv("GOOGLE_APPLICATION_CREDENTIALS", ""),
 
@@ -96,6 +106,8 @@ func (c *Config) GetMaskedSettings() map[string]interface{} {
 		"openai_api_key":         maskKey(c.OpenAIAPIKey),
 		"together_api_key":       maskKey(c.TogetherAPIKey),
 		"hf_api_key":             maskKey(c.HFAPIKey),
+		"cloudflare_account_id":  maskKey(c.CloudflareAccountID),
+		"cloudflare_api_token":   maskKey(c.CloudflareAPIToken),
 		"workspace_dir":          c.WorkspaceDir,
 		"export_dir":             c.ExportDir,
 		"log_level":              c.LogLevel,
@@ -117,6 +129,7 @@ func (c *Config) HasRequiredKeys() map[string]bool {
 		"openai":             c.OpenAIAPIKey != "",
 		"together":           c.TogetherAPIKey != "",
 		"hf":                 c.HFAPIKey != "",
+		"cloudflare":         c.CloudflareAccountID != "" && c.CloudflareAPIToken != "",
 	}
 }
 

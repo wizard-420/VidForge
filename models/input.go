@@ -22,13 +22,22 @@ type InputPayload struct {
 	UploadSchedule string `json:"upload_schedule"` // immediate | 19:00 | 20:00 | 21:00
 	CaptionStyle  string `json:"caption_style"`    // bold_white | subtitle | none
 	AutoUpload    bool   `json:"auto_upload"`      // if false, pause before stage 7
+	SkipVisualReview bool `json:"skip_visual_review"` // if true, do NOT pause for per-clip review after Stage 4 (default: false = review enabled)
 	ClipCount          int                  `json:"clip_count"`       // number of stock video clips to fetch (auto-derived from SecondsPerVisual when 0)
 	ImageCount         int                  `json:"image_count"`      // number of AI images to generate (auto-derived from SecondsPerVisual + AIImagePercent when 0)
 	SecondsPerVisual   int                  `json:"seconds_per_visual"` // pacing: 1 visual per N seconds of narration (3-15, default 6)
 	AIImagePercent     int                  `json:"ai_image_percent"` // % of visuals that should be AI images vs stock clips (0-100, default 0)
-	MusicUrl           string               `json:"music_url"`        // Jamendo track URL
+	MusicUrl           string               `json:"music_url"`        // Manual mode: direct download URL (Jamendo selection, paste, etc.)
+	MusicFileBase64    string               `json:"music_file_base64,omitempty"` // Manual mode: uploaded audio file as data URL (data:audio/...;base64,...)
 	MusicStart         int                  `json:"music_start"`      // crop start in seconds
 	MusicEnd           int                  `json:"music_end"`        // crop end in seconds
+	MusicPreset        string               `json:"music_preset,omitempty"`   // ai_generated mode: vibe preset id (peaceful_aesthetic | cinematic_drama | lofi_study | sunrise_vlog | asmr_calm | tech_futuristic | mysterious | motivational | custom)
+	MusicPrompt        string               `json:"music_prompt,omitempty"`   // ai_generated mode: free-text prompt (used when preset is "custom" or to override)
+	MusicProvider      string               `json:"music_provider,omitempty"` // ai_generated mode: auto | huggingface_musicgen | huggingface_stable_audio | jamendo
+	MusicAmbience      []string             `json:"music_ambience,omitempty"` // ai_generated mode: ambience layer search terms (birds, rain, wind, waves, fire, crowd, vinyl)
+	AIMusicAudioBase64 string               `json:"ai_music_audio_base64,omitempty"` // ai_generated mode: pre-generated track from /api/music/ai/generate preview (skips re-generation in pipeline)
+	AIMusicStart       int                  `json:"ai_music_start,omitempty"`        // ai_generated mode: crop start in seconds (applied when AIMusicAudioBase64 is set)
+	AIMusicEnd         int                  `json:"ai_music_end,omitempty"`          // ai_generated mode: crop end in seconds
 	GCPVoiceName       string               `json:"gcp_voice_name,omitempty"`       // Google Cloud TTS voice name (e.g. "en-US-Neural2-D")
 	GCPLanguageCode    string               `json:"gcp_language_code,omitempty"`    // BCP-47 language code (e.g. "en-US")
 	OutputQuality      string               `json:"output_quality,omitempty"`       // draft | standard | high — controls Pexels source selection + FFmpeg preset/CRF/FPS
@@ -124,9 +133,26 @@ func (p *InputPayload) Validate() []string {
 		errs = append(errs, "ai_image_percent must be between 0 and 100")
 	}
 
-	validMusicModes := map[string]bool{"auto": true, "skip": true, "manual": true}
+	validMusicModes := map[string]bool{"auto": true, "skip": true, "manual": true, "ai_generated": true}
 	if !validMusicModes[p.MusicMode] {
-		errs = append(errs, "music_mode must be one of: auto, skip, manual")
+		errs = append(errs, "music_mode must be one of: auto, skip, manual, ai_generated")
+	}
+
+	// Manual mode requires a source: either a direct URL or an uploaded file.
+	if p.MusicMode == "manual" && p.MusicUrl == "" && p.MusicFileBase64 == "" {
+		errs = append(errs, "manual music mode requires either music_url or music_file_base64")
+	}
+
+	// AI-generated mode: validate provider when explicitly set; if blank or "auto",
+	// the pipeline picks the best available provider at runtime.
+	if p.MusicMode == "ai_generated" && p.MusicProvider != "" {
+		validProviders := map[string]bool{
+			"auto": true, "huggingface_musicgen": true,
+			"huggingface_stable_audio": true, "jamendo": true,
+		}
+		if !validProviders[p.MusicProvider] {
+			errs = append(errs, "music_provider must be one of: auto, huggingface_musicgen, huggingface_stable_audio, jamendo")
+		}
 	}
 
 	validTones := map[string]bool{

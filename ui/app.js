@@ -28,12 +28,21 @@ const state = {
   seconds_per_visual: 6,
   ai_image_percent: 0,
   music_url: '',
+  music_file_base64: '',
   music_start: 0,
   music_end: 0,
+  music_preset: 'peaceful_aesthetic',
+  music_prompt: '',
+  music_provider: 'auto',
+  music_ambience: [],
+  ai_music_audio_base64: '',
+  ai_music_start: 0,
+  ai_music_end: 0,
   pre_generated_script: null,
   manual_audio_base64: {},
   gcp_voice_name: '',
-  gcp_language_code: ''
+  gcp_language_code: '',
+  skip_visual_review: false
 };
 
 // Global variables for recording
@@ -139,12 +148,29 @@ function validateWizardStep(step) {
       }
       break;
     case 4:
-      if (state.music_mode === 'manual' && !state.music_url) {
-        return 'Please search and select a music track, or switch to Auto Music / No Music.';
+      if (state.music_mode === 'manual' && !state.music_url && !state.music_file_base64) {
+        return 'Please pick a Jamendo track, paste a direct URL, or upload an audio file (or switch to Auto Music / No Music).';
       }
       break;
   }
   return null;
+}
+
+function musicSummary() {
+  const m = state.music_mode;
+  if (m === 'auto') return 'auto';
+  if (m === 'skip') return 'no music';
+  if (m === 'manual') {
+    if (state.music_file_base64) return 'manual (uploaded file)';
+    if (state.music_url) return 'manual (track selected)';
+    return 'manual';
+  }
+  if (m === 'ai_generated') {
+    const presetLabel = state.music_preset && state.music_preset !== 'custom' ? state.music_preset.replace(/_/g, ' ') : 'custom prompt';
+    const ambience = state.music_ambience.length > 0 ? ' + ' + state.music_ambience.join(', ') : '';
+    return 'AI — ' + presetLabel + ambience;
+  }
+  return m;
 }
 
 function renderWizardSummary() {
@@ -157,7 +183,7 @@ function renderWizardSummary() {
     ['Voice', state.voiceover_mode === 'ai' ? 'AI — ' + state.voice_id : state.voiceover_mode === 'gcp_tts' ? 'Google TTS — ' + state.gcp_voice_name : state.voiceover_mode === 'none' ? '🎵 Music only (no narration)' : 'Manual recording'],
     ['Script', state.pre_generated_script ? 'Approved (' + state.pre_generated_script.segments.length + ' segments)' : 'Will be generated'],
     ['Visuals', `${state.video_style} • 1 / ${state.seconds_per_visual}s` + (state.video_mode === 'manual' ? ' (manual)' : '')],
-    ['Music', state.music_mode + (state.music_mode === 'manual' && state.music_url ? ' (track selected)' : '')],
+    ['Music', musicSummary()],
     ['Tone', state.script_tone],
     ['Language', state.language],
     ['Captions', state.caption_style],
@@ -275,6 +301,18 @@ function setVoiceMode(mode) {
     state.gcp_language_code = 'en-US';
     loadGCPVoices('en-US');
   }
+
+  if (mode === 'gcp_tts') {
+    // Either show the empty hint or kick off a recommendation fetch.
+    maybeLoadVoiceRecommendation();
+  } else {
+    // Hide both panels when not on GCP TTS so they don't reappear with stale
+    // data when the user toggles back later (the next open will re-fetch).
+    const banner = document.getElementById('gcp-voice-rec-banner');
+    if (banner) banner.style.display = 'none';
+    const empty = document.getElementById('gcp-voice-rec-empty');
+    if (empty) empty.style.display = 'none';
+  }
 }
 
 function setVoice(id) {
@@ -307,6 +345,13 @@ async function loadGCPVoices(languageCode) {
   const voiceSelect = document.getElementById('gcp-voice-select');
   voiceSelect.innerHTML = '<option value="">Loading voices...</option>';
   document.getElementById('gcp-voice-info').style.display = 'none';
+
+  // Recompute the voice recommendation against the new language (different
+  // catalog → different ranked picks). The cache is keyed on language so
+  // switching back doesn't re-fetch.
+  if (state.voiceover_mode === 'gcp_tts') {
+    maybeLoadVoiceRecommendation();
+  }
 
   if (gcpVoicesCache[languageCode]) {
     renderGCPVoiceOptions(gcpVoicesCache[languageCode]);
@@ -392,6 +437,303 @@ function setGCPVoice(voiceName) {
   }
 
   renderGCPTTSPreview();
+}
+
+// ---------------------------------------------------------------------------
+// Voice recommendation (GCP TTS)
+//
+// Cache: keyed on (scriptHash + language). The recommendation depends on the
+// current script + selected GCP language. When either changes (user refines
+// the script, picks a different language), we re-fetch on the next open.
+// ---------------------------------------------------------------------------
+
+const voiceRecCache = {};       // key -> rec object
+let voiceRecDismissed = false;  // user dismissed banner for this session
+
+function currentScriptDocument() {
+  // currentDraftScript holds the unsaved draft while the user iterates;
+  // state.pre_generated_script is set after they click "Approve Script".
+  // Either is a valid input to the recommender.
+  return currentDraftScript || state.pre_generated_script || null;
+}
+
+function scriptHashShort(script) {
+  if (!script) return '';
+  // Cheap hash: concatenate ids + truncated text of the first few segments.
+  // Avoids re-fetching on identical scripts but invalidates on edits.
+  let s = (script.hook || '') + '|';
+  (script.segments || []).slice(0, 4).forEach(seg => {
+    s += seg.segment_id + ':' + (seg.text || '').slice(0, 60) + '|';
+  });
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return String(h);
+}
+
+function maybeLoadVoiceRecommendation() {
+  const script = currentScriptDocument();
+  const banner = document.getElementById('gcp-voice-rec-banner');
+  const empty = document.getElementById('gcp-voice-rec-empty');
+  if (!banner || !empty) return;
+
+  if (!script) {
+    banner.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  if (voiceRecDismissed) {
+    banner.style.display = 'none';
+    return;
+  }
+  loadVoiceRecommendation(script);
+}
+
+async function loadVoiceRecommendation(script) {
+  const lang = state.gcp_language_code || 'en-US';
+  const cacheKey = scriptHashShort(script) + '|' + lang;
+  const banner = document.getElementById('gcp-voice-rec-banner');
+  if (!banner) return;
+
+  if (voiceRecCache[cacheKey]) {
+    renderVoiceRecommendation(voiceRecCache[cacheKey]);
+    return;
+  }
+
+  // Show a loading skeleton so the panel isn't blank during the fetch.
+  banner.style.display = 'block';
+  document.getElementById('gcp-rec-character').textContent = 'Finding the right voice…';
+  document.getElementById('gcp-rec-gender').textContent = '';
+  document.getElementById('gcp-rec-voices').innerHTML = '<div class="rec-loading">Analysing your script…</div>';
+  document.getElementById('gcp-rec-reason').textContent = '';
+  document.getElementById('gcp-rec-note').style.display = 'none';
+
+  try {
+    const res = await fetch(API + '/api/tts/recommend-voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script, tone: state.script_tone, language: lang }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.warn('Voice recommendation failed:', err.error || res.statusText);
+      banner.style.display = 'none';
+      return;
+    }
+    const rec = await res.json();
+    voiceRecCache[cacheKey] = rec;
+    renderVoiceRecommendation(rec);
+  } catch (err) {
+    console.warn('Voice recommendation failed:', err);
+    banner.style.display = 'none';
+  }
+}
+
+function renderVoiceRecommendation(rec) {
+  if (!rec || !rec.voices || rec.voices.length === 0) {
+    const banner = document.getElementById('gcp-voice-rec-banner');
+    if (banner) banner.style.display = 'none';
+    return;
+  }
+  document.getElementById('gcp-voice-rec-banner').style.display = 'block';
+  document.getElementById('gcp-rec-character').textContent = rec.character || 'Recommended voice';
+  document.getElementById('gcp-rec-gender').textContent = genderLabel(rec.gender_hint);
+
+  const chipsEl = document.getElementById('gcp-rec-voices');
+  chipsEl.innerHTML = rec.voices.map((v, i) => {
+    const family = v.family ? `<span class="rec-chip-meta">${escapeHTML(v.family)}</span>` : '';
+    const gender = v.gender ? `<span class="rec-chip-meta">${escapeHTML(genderLabel(v.gender))}</span>` : '';
+    const star = i === 0 ? '<span class="rec-chip-star">★</span>' : '';
+    return `<button type="button" class="rec-chip rec-chip-voice" onclick="applyVoiceRecommendation(${i})" title="${escapeAttr(v.reason || '')}">
+      ${star}<span class="rec-chip-name">${escapeHTML(v.name)}</span>${gender}${family}
+    </button>`;
+  }).join('');
+
+  document.getElementById('gcp-rec-reason').textContent = rec.reason || '';
+  const noteEl = document.getElementById('gcp-rec-note');
+  if (rec.note) {
+    noteEl.textContent = rec.note;
+    noteEl.style.display = 'block';
+  } else {
+    noteEl.style.display = 'none';
+  }
+}
+
+function genderLabel(g) {
+  if (!g) return '';
+  const lower = String(g).toLowerCase();
+  if (lower === 'male' || lower === 'female') return lower.charAt(0).toUpperCase() + lower.slice(1) + ' voice';
+  if (lower === 'either') return 'Either gender';
+  if (lower === 'neutral') return 'Neutral';
+  return g;
+}
+
+function applyVoiceRecommendation(idx) {
+  const lang = state.gcp_language_code || 'en-US';
+  const cacheKey = scriptHashShort(currentScriptDocument()) + '|' + lang;
+  const rec = voiceRecCache[cacheKey];
+  if (!rec || !rec.voices || !rec.voices[idx]) return;
+  const voiceName = rec.voices[idx].name;
+  const select = document.getElementById('gcp-voice-select');
+  if (select) {
+    select.value = voiceName;
+    if (select.value === voiceName) {
+      setGCPVoice(voiceName);
+    } else {
+      // Voice catalog may not be loaded yet — apply once the dropdown is
+      // populated. loadGCPVoices() resolves the cache synchronously when
+      // a hit, otherwise we wait one tick and try again.
+      setTimeout(() => {
+        select.value = voiceName;
+        if (select.value === voiceName) setGCPVoice(voiceName);
+      }, 300);
+    }
+  }
+  // Highlight the picked chip
+  document.querySelectorAll('#gcp-rec-voices .rec-chip').forEach((c, i) => {
+    c.classList.toggle('rec-chip-applied', i === idx);
+  });
+}
+
+function dismissVoiceRecommendation() {
+  voiceRecDismissed = true;
+  const banner = document.getElementById('gcp-voice-rec-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+// ---------------------------------------------------------------------------
+// Music recommendation (manual Jamendo search)
+// ---------------------------------------------------------------------------
+
+const musicRecCache = {};       // scriptHash + tone -> rec object
+let musicRecDismissed = false;
+let musicRecActiveQuery = '';   // currently-applied chip, for highlighting
+
+function maybeLoadMusicRecommendation() {
+  const script = currentScriptDocument();
+  const banner = document.getElementById('music-rec-banner');
+  const empty = document.getElementById('music-rec-empty');
+  if (!banner || !empty) return;
+
+  if (!script) {
+    banner.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  if (musicRecDismissed) {
+    banner.style.display = 'none';
+    return;
+  }
+  loadMusicRecommendation(script);
+}
+
+async function loadMusicRecommendation(script) {
+  const cacheKey = scriptHashShort(script) + '|' + (state.script_tone || '');
+  const banner = document.getElementById('music-rec-banner');
+  if (!banner) return;
+
+  if (musicRecCache[cacheKey]) {
+    renderMusicRecommendation(musicRecCache[cacheKey], /*autoSearchFirst=*/false);
+    return;
+  }
+
+  banner.style.display = 'block';
+  document.getElementById('music-rec-mood-summary').textContent = 'Picking music ideas…';
+  document.getElementById('music-rec-chips').innerHTML = '<div class="rec-loading">Analysing your script…</div>';
+  const explainWrap = document.getElementById('music-rec-explain-wrap');
+  if (explainWrap) explainWrap.style.display = 'none';
+
+  try {
+    const res = await fetch(API + '/api/music/recommend-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script, tone: state.script_tone }),
+    });
+    if (!res.ok) {
+      console.warn('Music recommendation failed:', res.statusText);
+      banner.style.display = 'none';
+      return;
+    }
+    const rec = await res.json();
+    musicRecCache[cacheKey] = rec;
+    renderMusicRecommendation(rec, /*autoSearchFirst=*/true);
+  } catch (err) {
+    console.warn('Music recommendation failed:', err);
+    banner.style.display = 'none';
+  }
+}
+
+function renderMusicRecommendation(rec, autoSearchFirst) {
+  if (!rec || !rec.queries || rec.queries.length === 0) {
+    const banner = document.getElementById('music-rec-banner');
+    if (banner) banner.style.display = 'none';
+    return;
+  }
+  document.getElementById('music-rec-banner').style.display = 'block';
+
+  // Mood summary line
+  const dominant = rec.dominant_mood ? `<strong>${escapeHTML(rec.dominant_mood)}</strong>` : '';
+  const secondary = rec.secondary_mood ? ` · also ${escapeHTML(rec.secondary_mood)}` : '';
+  const variance = rec.mood_variance ? ' · <em>mixed moods</em>' : '';
+  const tone = state.script_tone ? ` · tone: ${escapeHTML(state.script_tone)}` : '';
+  document.getElementById('music-rec-mood-summary').innerHTML =
+    dominant ? `Mood: ${dominant}${secondary}${variance}${tone}` : (tone || 'Suggested music searches');
+
+  // Chips for each query
+  const chipsEl = document.getElementById('music-rec-chips');
+  chipsEl.innerHTML = rec.queries.map((q, i) => {
+    const star = i === 0 ? '<span class="rec-chip-star">★</span>' : '';
+    const active = q === musicRecActiveQuery ? ' rec-chip-applied' : '';
+    return `<button type="button" class="rec-chip rec-chip-query${active}" onclick="applyMusicSearch(${i})">
+      ${star}<span class="rec-chip-name">${escapeHTML(q)}</span>
+    </button>`;
+  }).join('');
+
+  // Explanation (LLM-only)
+  const explainWrap = document.getElementById('music-rec-explain-wrap');
+  const reasonEl = document.getElementById('music-rec-reason');
+  if (rec.explanation && rec.explanation.trim()) {
+    reasonEl.textContent = rec.explanation;
+    explainWrap.style.display = 'block';
+  } else {
+    explainWrap.style.display = 'none';
+  }
+  const avoidWrap = document.getElementById('music-rec-avoid-wrap');
+  const avoidEl = document.getElementById('music-rec-avoid');
+  if (rec.avoid && rec.avoid.length) {
+    avoidEl.textContent = rec.avoid.join(', ');
+    avoidWrap.style.display = 'block';
+  } else {
+    avoidWrap.style.display = 'none';
+  }
+
+  // Auto-run the top query so the results list is pre-populated.
+  if (autoSearchFirst && rec.queries.length > 0) {
+    applyMusicSearch(0);
+  }
+}
+
+function applyMusicSearch(idx) {
+  const cacheKey = scriptHashShort(currentScriptDocument()) + '|' + (state.script_tone || '');
+  const rec = musicRecCache[cacheKey];
+  if (!rec || !rec.queries || !rec.queries[idx]) return;
+  const q = rec.queries[idx];
+  musicRecActiveQuery = q;
+
+  const input = document.getElementById('jamendo-search');
+  if (input) input.value = q;
+  // Highlight the applied chip
+  document.querySelectorAll('#music-rec-chips .rec-chip').forEach((c, i) => {
+    c.classList.toggle('rec-chip-applied', i === idx);
+  });
+  searchJamendo();
+}
+
+function dismissMusicRecommendation() {
+  musicRecDismissed = true;
+  const banner = document.getElementById('music-rec-banner');
+  if (banner) banner.style.display = 'none';
 }
 
 function renderGCPTTSPreview() {
@@ -542,10 +884,315 @@ function setMusicMode(mode) {
   const panel = document.querySelector('.wizard-panel[data-panel="4"]');
   const btns = panel.querySelector('.toggle-group').children;
   btns[0].classList.toggle('active', mode === 'auto');
-  btns[1].classList.toggle('active', mode === 'manual');
-  btns[2].classList.toggle('active', mode === 'skip');
+  btns[1].classList.toggle('active', mode === 'ai_generated');
+  btns[2].classList.toggle('active', mode === 'manual');
+  btns[3].classList.toggle('active', mode === 'skip');
+
   document.getElementById('auto-music-genre').style.display = mode === 'auto' ? 'block' : 'none';
+  document.getElementById('ai-music-section').style.display = mode === 'ai_generated' ? 'block' : 'none';
   document.getElementById('manual-music-section').style.display = mode === 'manual' ? 'block' : 'none';
+
+  // Initialise the AI panel preview the first time it's shown.
+  if (mode === 'ai_generated') updateAIMusicPromptPreview();
+
+  // Manual music opens on the Jamendo source by default; surface the
+  // recommendation banner immediately so the search box isn't a blank slate.
+  if (mode === 'manual') {
+    maybeLoadMusicRecommendation();
+  } else {
+    const banner = document.getElementById('music-rec-banner');
+    if (banner) banner.style.display = 'none';
+  }
+}
+
+// ---- AI Music ----
+//
+// Vibe presets are mirrored on the server (pipeline/music_ai.go); we keep the
+// human-readable preview here so the user sees what the model will actually
+// receive. Selecting a preset replaces both the prompt AND the ambience stack
+// (so the result feels intentional). "custom" mode unlocks the textarea.
+const aiMusicPresets = {
+  peaceful_aesthetic: {
+    prompt: 'Calm cinematic nature ambience, soft piano, airy vocal pad, light strings, distant reverb, peaceful sunrise mood, slow 70 BPM',
+    ambience: ['birds', 'wind']
+  },
+  cinematic_drama: {
+    prompt: 'Epic cinematic orchestral, deep cinematic drone, slow timpani, sweeping strings, emotional swell, hopeful but tense',
+    ambience: []
+  },
+  lofi_study: {
+    prompt: 'Chill lo-fi hip hop beat, vinyl crackle, soft Rhodes piano, mellow drums, jazzy chords, focused study mood, 80 BPM',
+    ambience: ['vinyl']
+  },
+  sunrise_vlog: {
+    prompt: 'Warm acoustic guitar, gentle finger-picked melody, soft strings, hopeful uplifting mood, morning vlog feel',
+    ambience: ['birds']
+  },
+  asmr_calm: {
+    prompt: 'Soft ambient drone, gentle synth pads, very slow evolving texture, sleep meditation mood, no drums',
+    ambience: ['waves', 'rain']
+  },
+  tech_futuristic: {
+    prompt: 'Modern electronic ambient, synth pads, soft glitch textures, motivational pulse, futuristic tech feel',
+    ambience: []
+  },
+  mysterious: {
+    prompt: 'Suspenseful dark ambient, low drones, distant whispered textures, eerie tension build, no melody',
+    ambience: ['wind']
+  },
+  motivational: {
+    prompt: 'High-energy uplifting orchestral, driving drums, anthemic strings, triumphant climax, motivational mood',
+    ambience: []
+  },
+  custom: { prompt: '', ambience: [] }
+};
+
+function setMusicPreset(presetId) {
+  state.music_preset = presetId;
+  const preset = aiMusicPresets[presetId] || aiMusicPresets.custom;
+
+  const promptInput = document.getElementById('ai-music-prompt');
+  if (presetId === 'custom') {
+    state.music_prompt = promptInput.value.trim();
+  } else {
+    state.music_prompt = '';
+    promptInput.value = preset.prompt;
+  }
+  state.music_ambience = preset.ambience.slice();
+
+  document.querySelectorAll('.vibe-preset-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.preset === presetId);
+  });
+  document.querySelectorAll('.ambience-chip').forEach(chip => {
+    chip.classList.toggle('active', state.music_ambience.includes(chip.dataset.ambience));
+  });
+
+  resetAIMusicPreview();
+  updateAIMusicPromptPreview();
+}
+
+function onAIMusicPromptInput(value) {
+  state.music_prompt = (value || '').trim();
+  // Free-typing implicitly switches the preset to "custom" so the user's
+  // text is preserved when re-rendering the preview.
+  if (state.music_preset !== 'custom') {
+    state.music_preset = 'custom';
+    document.querySelectorAll('.vibe-preset-card').forEach(c => {
+      c.classList.toggle('active', c.dataset.preset === 'custom');
+    });
+  }
+  resetAIMusicPreview();
+  updateAIMusicPromptPreview();
+}
+
+function toggleAmbience(tag) {
+  const idx = state.music_ambience.indexOf(tag);
+  if (idx >= 0) state.music_ambience.splice(idx, 1);
+  else state.music_ambience.push(tag);
+
+  document.querySelectorAll('.ambience-chip').forEach(chip => {
+    chip.classList.toggle('active', state.music_ambience.includes(chip.dataset.ambience));
+  });
+  resetAIMusicPreview();
+  updateAIMusicPromptPreview();
+}
+
+function updateAIMusicPromptPreview() {
+  const preset = aiMusicPresets[state.music_preset] || aiMusicPresets.custom;
+  let prompt = state.music_prompt || preset.prompt || '(no prompt set)';
+  if (state.music_ambience.length > 0) {
+    prompt += ', with subtle ' + state.music_ambience.join(' and ') + ' atmosphere';
+  }
+  const el = document.getElementById('ai-music-prompt-value');
+  if (el) el.textContent = prompt;
+}
+
+// ---- AI Music Preview / Regenerate ----
+//
+// Calls POST /api/music/ai/generate with the current preset + prompt + ambience
+// + provider, gets MP3 bytes back as base64, plays them in the wizard, and
+// stores them in state so the job submission reuses the pre-generated track
+// instead of re-running the slow provider chain.
+
+async function generateAIMusicPreview(isRegenerate) {
+  const btn = document.getElementById('btn-ai-music-preview');
+  const status = document.getElementById('ai-music-status');
+  const panel = document.getElementById('ai-music-track-panel');
+
+  // Build the same prompt the prompt-preview line shows (preset → custom → tone fallback).
+  const preset = aiMusicPresets[state.music_preset] || aiMusicPresets.custom;
+  const prompt = (state.music_prompt && state.music_prompt.trim()) || preset.prompt || '';
+
+  const body = {
+    preset: state.music_preset,
+    prompt: prompt,
+    provider: state.music_provider,
+    script_tone: state.script_tone,
+    ambience: state.music_ambience.slice(),
+    duration_sec: 30
+  };
+
+  btn.disabled = true;
+  btn.textContent = isRegenerate ? '🔄 Regenerating...' : '⏳ Generating (30-90s)...';
+  if (status) status.textContent = 'Calling AI provider — this can take up to 90 seconds the first time.';
+
+  try {
+    const resp = await fetch(API + '/api/music/ai/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.error || ('HTTP ' + resp.status));
+    }
+
+    const dataUrl = 'data:audio/mpeg;base64,' + data.audio_base64;
+    state.ai_music_audio_base64 = dataUrl;
+    state.ai_music_start = 0;
+    state.ai_music_end = data.duration_sec || 30;
+
+    // Refresh the audio player. Re-set src on regenerate so the browser
+    // discards the previous buffered track.
+    const audio = document.getElementById('ai-music-audio');
+    audio.pause();
+    audio.src = dataUrl;
+    audio.load();
+
+    // Reset crop sliders to the new track's full length.
+    const startSlider = document.getElementById('ai-music-start-slider');
+    const endSlider = document.getElementById('ai-music-end-slider');
+    const fullLen = state.ai_music_end;
+    startSlider.max = fullLen;
+    endSlider.max = fullLen;
+    startSlider.value = 0;
+    endSlider.value = fullLen;
+    document.getElementById('ai-music-start-val').textContent = '0';
+    document.getElementById('ai-music-end-val').textContent = String(fullLen);
+
+    // Provider badge — tells the user which leg of the chain succeeded.
+    const badge = document.getElementById('ai-music-provider-badge');
+    if (badge) {
+      const labels = {
+        huggingface_musicgen: 'MusicGen',
+        huggingface_stable_audio: 'Stable Audio',
+        jamendo: 'Jamendo (fallback)'
+      };
+      badge.textContent = labels[data.provider_used] || data.provider_used || 'AI';
+    }
+
+    panel.style.display = 'block';
+    btn.textContent = '🔁 Generate Another Preview';
+    if (status) status.textContent = isRegenerate ? '✅ New variation ready.' : '✅ Preview ready — play it below.';
+  } catch (err) {
+    console.error('AI music preview failed:', err);
+    if (status) status.textContent = '❌ ' + (err.message || 'Generation failed');
+    btn.textContent = '🎵 Generate Preview';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function updateAIMusicCrop(changedId) {
+  const startSlider = document.getElementById('ai-music-start-slider');
+  const endSlider = document.getElementById('ai-music-end-slider');
+
+  let start = parseInt(startSlider.value);
+  let end = parseInt(endSlider.value);
+
+  // Keep the two thumbs from crossing each other.
+  if (start >= end) {
+    if (changedId === 'ai-music-start-slider') start = end - 1;
+    else end = start + 1;
+    startSlider.value = start;
+    endSlider.value = end;
+  }
+
+  state.ai_music_start = start;
+  state.ai_music_end = end;
+  document.getElementById('ai-music-start-val').textContent = String(start);
+  document.getElementById('ai-music-end-val').textContent = String(end);
+
+  const audio = document.getElementById('ai-music-audio');
+  if (audio && Math.abs(audio.currentTime - start) > 1) {
+    audio.currentTime = start;
+  }
+}
+
+// Drop any cached preview when the user changes their preset/prompt/ambience
+// so they don't accidentally submit a job with a stale track that no longer
+// matches what they see in the prompt preview line. Called from the existing
+// preset / ambience / prompt handlers below via resetAIMusicPreview().
+function setAIMusicProvider(provider) {
+  state.music_provider = provider;
+  resetAIMusicPreview();
+}
+
+function resetAIMusicPreview() {
+  state.ai_music_audio_base64 = '';
+  state.ai_music_start = 0;
+  state.ai_music_end = 0;
+  const panel = document.getElementById('ai-music-track-panel');
+  if (panel) panel.style.display = 'none';
+  const btn = document.getElementById('btn-ai-music-preview');
+  if (btn) btn.textContent = '🎵 Generate Preview';
+  const status = document.getElementById('ai-music-status');
+  if (status) status.textContent = '';
+  const audio = document.getElementById('ai-music-audio');
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+}
+
+// Manual mode supports three sources of audio: Jamendo search, a direct URL,
+// or an uploaded local file. Switching sources clears any previously chosen
+// track so the user can't accidentally send stale state to the backend.
+function setManualMusicSource(source) {
+  const tabs = document.querySelector('.manual-music-source-tabs').children;
+  tabs[0].classList.toggle('active', source === 'jamendo');
+  tabs[1].classList.toggle('active', source === 'url');
+  tabs[2].classList.toggle('active', source === 'upload');
+
+  document.getElementById('manual-source-jamendo').style.display = source === 'jamendo' ? 'block' : 'none';
+  document.getElementById('manual-source-url').style.display = source === 'url' ? 'block' : 'none';
+  document.getElementById('manual-source-upload').style.display = source === 'upload' ? 'block' : 'none';
+
+  // Clear prior selection from a different source so we never submit two at once.
+  resetSelectedTrack();
+
+  // Show recommendations only on the Jamendo tab — URL/upload have nothing
+  // we can pre-populate. Hide the banner otherwise so it doesn't linger.
+  if (source === 'jamendo') {
+    maybeLoadMusicRecommendation();
+  } else {
+    const banner = document.getElementById('music-rec-banner');
+    if (banner) banner.style.display = 'none';
+    const empty = document.getElementById('music-rec-empty');
+    if (empty) empty.style.display = 'none';
+  }
+}
+
+function resetSelectedTrack() {
+  state.music_url = '';
+  state.music_file_base64 = '';
+  state.music_start = 0;
+  state.music_end = 0;
+  document.getElementById('selected-track-ui').style.display = 'none';
+  const audio = document.getElementById('jamendo-audio');
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+  const fileInput = document.getElementById('manual-music-file');
+  if (fileInput) fileInput.value = '';
+  const urlInput = document.getElementById('manual-music-url');
+  if (urlInput) urlInput.value = '';
+  const uploadedInfo = document.getElementById('manual-uploaded-info');
+  if (uploadedInfo) uploadedInfo.style.display = 'none';
 }
 
 async function searchJamendo() {
@@ -577,25 +1224,98 @@ async function searchJamendo() {
 
 function selectJamendoTrack(downloadUrl, streamUrl, name, duration) {
   state.music_url = downloadUrl;
+  state.music_file_base64 = '';
+  showSelectedTrack(name, streamUrl, duration);
+}
+
+// Direct URL input: every keystroke updates state. We use the URL itself as
+// both the audio preview source and the backend download source, so the
+// preview only works for CORS-friendly URLs — duration is best-effort.
+function onManualUrlInput(value) {
+  const url = (value || '').trim();
+  state.music_file_base64 = '';
+  if (!url) {
+    state.music_url = '';
+    document.getElementById('selected-track-ui').style.display = 'none';
+    return;
+  }
+  state.music_url = url;
+
+  const audio = document.getElementById('jamendo-audio');
+  audio.src = url;
+  document.getElementById('selected-track-name').textContent = url.split('/').pop() || url;
+
+  audio.onloadedmetadata = () => {
+    const duration = Math.floor(audio.duration) || 60;
+    showSelectedTrack(document.getElementById('selected-track-name').textContent, url, duration);
+  };
+  audio.onerror = () => {
+    // Preview failed (likely CORS) — still let the user proceed; backend will fetch directly.
+    showSelectedTrack(document.getElementById('selected-track-name').textContent, url, 60);
+  };
+  document.getElementById('selected-track-ui').style.display = 'block';
+}
+
+// Local file upload: read into a data URL so we can both preview it locally
+// and ship it to the backend in the JSON job payload.
+function handleMusicFileUpload(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    state.music_file_base64 = dataUrl;
+    state.music_url = '';
+
+    const audio = document.getElementById('jamendo-audio');
+    audio.src = dataUrl;
+    audio.onloadedmetadata = () => {
+      const duration = Math.floor(audio.duration) || 60;
+      showSelectedTrack(file.name, dataUrl, duration);
+    };
+    audio.onerror = () => {
+      showSelectedTrack(file.name, dataUrl, 60);
+    };
+
+    const sizeKb = (file.size / 1024).toFixed(0);
+    const sizeStr = file.size > 1024 * 1024
+      ? (file.size / (1024 * 1024)).toFixed(2) + ' MB'
+      : sizeKb + ' KB';
+    document.getElementById('manual-uploaded-name').textContent = file.name;
+    document.getElementById('manual-uploaded-meta').textContent = (file.type || 'audio') + ' · ' + sizeStr;
+    document.getElementById('manual-uploaded-info').style.display = 'block';
+  };
+  reader.onerror = () => {
+    alert('Failed to read the audio file. Please try a different file.');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearUploadedMusic() {
+  resetSelectedTrack();
+}
+
+// Common UI hook for "we now have a chosen track" — used by all three sources.
+function showSelectedTrack(name, previewSrc, duration) {
   state.music_start = 0;
   state.music_end = duration;
 
   document.getElementById('selected-track-name').textContent = name;
   const audio = document.getElementById('jamendo-audio');
-  audio.src = streamUrl;
-  
+  if (audio.src !== previewSrc) audio.src = previewSrc;
+
   const startSlider = document.getElementById('music-start-slider');
   const endSlider = document.getElementById('music-end-slider');
-  
+
   startSlider.max = duration;
   startSlider.value = 0;
-  
   endSlider.max = duration;
   endSlider.value = duration;
-  
+
   document.getElementById('music-start-val').textContent = '0';
   document.getElementById('music-end-val').textContent = duration;
-  
+
   document.getElementById('selected-track-ui').style.display = 'block';
 }
 
@@ -766,6 +1486,16 @@ function connectWebSocket(jobId) {
       const videoEl = document.getElementById('preview-video');
       videoEl.src = `${API}/api/jobs/${jobId}/download`;
       videoEl.load();
+    } else if (data.status === 'pending_visual_review') {
+      // Pipeline paused after Stage 4 — show the per-clip review screen so
+      // the user can preview each generated clip, regenerate the ones they
+      // don't like, and optionally add Instagram-style text overlays.
+      updateStep(4, 'done', data.message || 'All clips ready');
+      openVisualReview(jobId);
+    } else if (data.status === 'clip_regenerated') {
+      // A single clip was just regenerated. Refresh that tile in place
+      // (no full reload) by re-fetching the list quietly.
+      reloadVisualReview();
     } else {
       updateStep(data.stage, data.progress_pct >= 100 ? 'done' : 'running', data.message);
     }
@@ -800,6 +1530,644 @@ async function rejectJob() {
     alert('Failed to reject job: ' + err);
   }
 }
+
+// =====================================================================
+//  Per-clip Visual Review (Stage 4 pause)
+// =====================================================================
+//
+// When the pipeline finishes Stage 4 it pauses with status
+// "pending_visual_review". The UI opens a grid of every generated visual
+// so the user can preview, regenerate, or annotate each one before the
+// video is rendered.
+
+let visualReviewClips = [];          // last server snapshot of clip review items
+let visualReviewEditingKey = null;   // which clip the overlay editor is targeting
+
+async function openVisualReview(jobId) {
+  if (jobId) currentJobId = jobId;
+  document.getElementById('visual-review-panel').style.display = 'block';
+  document.getElementById('visual-review-panel').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  await reloadVisualReview();
+}
+
+async function reloadVisualReview() {
+  if (!currentJobId) return;
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips`);
+    if (!res.ok) {
+      console.warn('Failed to load clips:', res.status);
+      return;
+    }
+    const data = await res.json();
+    visualReviewClips = data.clips || [];
+    renderVisualReview();
+  } catch (err) {
+    console.error('reloadVisualReview', err);
+  }
+}
+
+function renderVisualReview() {
+  const grid = document.getElementById('visual-review-grid');
+  const countEl = document.getElementById('visual-review-count');
+  if (!grid || !countEl) return;
+
+  countEl.textContent = visualReviewClips.length;
+  if (!visualReviewClips.length) {
+    grid.innerHTML = `<div class="visual-review-empty">No visuals generated yet. Click Refresh to retry.</div>`;
+    return;
+  }
+
+  grid.innerHTML = visualReviewClips.map(item => {
+    const isImage = item.source_type === 'image';
+    const previewUrl = `${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(item.key)}/preview?t=${item.regen_count || 0}`;
+    const segLabel = item.sub_index >= 0
+      ? `Seg ${item.segment_id} · Visual ${item.sub_index + 1}`
+      : `Seg ${item.segment_id}`;
+    const overlayBadge = (item.overlay && item.overlay.text)
+      ? `<span class="vr-badge vr-badge-overlay" title="${escapeHTML(item.overlay.text)}">✏️ ${escapeHTML(item.overlay.text.slice(0, 18))}${item.overlay.text.length > 18 ? '…' : ''}</span>`
+      : '';
+    const regenBadge = (item.regen_count > 0)
+      ? `<span class="vr-badge vr-badge-regen">↻ ${item.regen_count}</span>`
+      : '';
+    const media = isImage
+      ? `<img src="${previewUrl}" alt="visual" loading="lazy">`
+      : `<video src="${previewUrl}" muted loop playsinline preload="metadata" onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>`;
+
+    return `
+      <div class="vr-card" data-key="${escapeAttr(item.key)}">
+        <div class="vr-card-media" onclick="openClipFullPreview('${escapeAttr(item.key)}')">
+          ${media}
+          <span class="vr-type-pill">${isImage ? '🖼 Image' : '🎬 Clip'}</span>
+        </div>
+        <div class="vr-card-body">
+          <div class="vr-card-meta">
+            <span class="vr-card-seg">${segLabel}</span>
+            ${regenBadge}
+            ${overlayBadge}
+          </div>
+          <div class="vr-card-narration" title="${escapeAttr(item.narration_text || '')}">
+            ${escapeHTML((item.narration_text || '').slice(0, 100))}${(item.narration_text || '').length > 100 ? '…' : ''}
+          </div>
+          <input type="text" class="vr-query-input premium-input"
+                 value="${escapeAttr(item.query || '')}"
+                 data-key="${escapeAttr(item.key)}"
+                 placeholder="Search query / AI prompt"
+                 title="Edit the query then click Regenerate to use it">
+          <div class="vr-card-actions">
+            <button class="vr-btn vr-btn-regen" onclick="regenerateClip('${escapeAttr(item.key)}', false)" title="Same query, different result">🔄 Regen</button>
+            <button class="vr-btn vr-btn-regen-edit" onclick="regenerateClip('${escapeAttr(item.key)}', true)" title="Use the edited query above">🔄✎ With query</button>
+            <button class="vr-btn vr-btn-toggle" onclick="toggleClipType('${escapeAttr(item.key)}')" title="Switch between stock clip and AI image">${isImage ? '🎬 → Clip' : '🖼 → Image'}</button>
+            <button class="vr-btn vr-btn-overlay" onclick="openOverlayEditor('${escapeAttr(item.key)}')">✏️ Text</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+function escapeAttr(str) {
+  return String(str || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function regenerateClip(key, useEditedQuery) {
+  if (!currentJobId) return;
+  const card = document.querySelector(`.vr-card[data-key="${cssEscape(key)}"]`);
+  if (card) card.classList.add('vr-card-loading');
+  const body = {};
+  if (useEditedQuery) {
+    const input = card?.querySelector('.vr-query-input');
+    if (input && input.value.trim()) body.query = input.value.trim();
+  }
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(key)}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Regenerate failed: ' + (err.error || res.statusText));
+      return;
+    }
+    // The WebSocket "clip_regenerated" event will trigger a reload, but we
+    // also reload here in case the WS isn't connected.
+    await reloadVisualReview();
+  } catch (err) {
+    alert('Regenerate failed: ' + err.message);
+  } finally {
+    if (card) card.classList.remove('vr-card-loading');
+  }
+}
+
+async function toggleClipType(key) {
+  const item = visualReviewClips.find(c => c.key === key);
+  if (!item || !currentJobId) return;
+  const newType = item.source_type === 'image' ? 'clip' : 'image';
+  const card = document.querySelector(`.vr-card[data-key="${cssEscape(key)}"]`);
+  if (card) card.classList.add('vr-card-loading');
+  try {
+    const input = card?.querySelector('.vr-query-input');
+    const body = { source_type: newType };
+    if (input && input.value.trim() && input.value.trim() !== item.query) {
+      body.query = input.value.trim();
+    }
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(key)}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Switch type failed: ' + (err.error || res.statusText));
+      return;
+    }
+    await reloadVisualReview();
+  } catch (err) {
+    alert('Switch type failed: ' + err.message);
+  } finally {
+    if (card) card.classList.remove('vr-card-loading');
+  }
+}
+
+function cssEscape(str) {
+  // CSS.escape isn't on every old browser; this fallback handles the
+  // chars that show up in our keys ("0", "1_2", etc.).
+  if (window.CSS && CSS.escape) return CSS.escape(str);
+  return String(str).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+async function approveAllVisuals() {
+  if (!currentJobId) return;
+  const btn = document.getElementById('btn-approve-visuals');
+  btn.disabled = true;
+  btn.textContent = 'Resuming…';
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips/approve-all`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Failed to continue: ' + (err.error || res.statusText));
+      btn.disabled = false;
+      btn.textContent = '✅ Continue to Render →';
+      return;
+    }
+    document.getElementById('visual-review-panel').style.display = 'none';
+  } catch (err) {
+    alert('Failed to continue: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = '✅ Continue to Render →';
+  }
+}
+
+// ---- Overlay editor ----
+//
+// Two responsibilities:
+//   1) Persist overlay JSON to the backend (saveOverlay / clearOverlay).
+//   2) Render a live HTML preview that mirrors the FFmpeg drawtext output
+//      closely enough that the user can pick size/position/shadow without
+//      a server round-trip. The "Render real preview" button triggers a
+//      backend FFmpeg pass for pixel-accurate confirmation.
+
+// CSS placement that mirrors the 9-cell position grid used by drawtext.
+// Keep in sync with positionExpr() in pipeline/renderer.go.
+const OVERLAY_POSITION_CSS = {
+  'top-left':   { top: '5%',   left: '5%',   transform: 'none' },
+  'top-center': { top: '5%',   left: '50%',  transform: 'translateX(-50%)' },
+  'top-right':  { top: '5%',   right: '5%',  transform: 'none' },
+  'mid-left':   { top: '50%',  left: '5%',   transform: 'translateY(-50%)' },
+  'mid-center': { top: '50%',  left: '50%',  transform: 'translate(-50%, -50%)' },
+  'mid-right':  { top: '50%',  right: '5%',  transform: 'translateY(-50%)' },
+  'bot-left':   { bottom: '8%', left: '5%',  transform: 'none' },
+  'bot-center': { bottom: '8%', left: '50%', transform: 'translateX(-50%)' },
+  'bot-right':  { bottom: '8%', right: '5%', transform: 'none' },
+};
+
+// Shadow presets — must produce the same overlay JSON we send to the
+// backend. The CSS variant uses textShadow values that match the visual
+// of the FFmpeg drawtext layers.
+const SHADOW_PRESETS = {
+  none:   { ffmpeg: { shadow_color: '', shadow_x: 0,  shadow_y: 0, glow: false }, css: null },
+  soft:   { ffmpeg: { shadow_color: 'black@0.6', shadow_x: 2, shadow_y: 2, glow: false }, css: { x: 2, y: 2, blur: 2, color: 'rgba(0,0,0,0.6)' } },
+  hard:   { ffmpeg: { shadow_color: 'black@0.9', shadow_x: 3, shadow_y: 3, glow: false }, css: { x: 3, y: 3, blur: 0, color: 'rgba(0,0,0,0.9)' } },
+  long:   { ffmpeg: { shadow_color: 'black@0.7', shadow_x: 6, shadow_y: 6, glow: false }, css: { x: 6, y: 6, blur: 4, color: 'rgba(0,0,0,0.7)' } },
+  glow:   { ffmpeg: { shadow_color: 'white@0.7', shadow_x: 0, shadow_y: 0, glow: true  }, css: { x: 0, y: 0, blur: 10, color: 'rgba(255,255,255,0.7)' } },
+  custom: { ffmpeg: null, css: null }, // resolved from the X/Y sliders + color
+};
+
+// Aspect ratio of the source video frame in pixels — used to scale the
+// stored "source coordinate" font size into the preview's pixel space.
+const ASPECT_DIMS = {
+  landscape: { w: 1920, h: 1080 },
+  portrait:  { w: 1080, h: 1920 },
+  square:    { w: 1080, h: 1080 },
+};
+
+let overlayServerPreviewTs = 0; // cache-buster for the rendered preview file
+
+function openOverlayEditor(key) {
+  visualReviewEditingKey = key;
+  const item = visualReviewClips.find(c => c.key === key);
+  const overlay = (item && item.overlay) || {};
+
+  document.getElementById('overlay-text').value = overlay.text || '';
+  document.getElementById('overlay-size').value = overlay.font_size || 48;
+  document.getElementById('overlay-size-val').textContent = overlay.font_size || 48;
+  document.getElementById('overlay-color').value = colorNameToHex(overlay.font_color) || '#ffffff';
+  document.getElementById('overlay-box').checked = !!overlay.box_color;
+  document.getElementById('overlay-fade').checked = overlay.fade_in !== false;
+
+  // Typography
+  document.getElementById('overlay-font').value = overlay.font_family || 'Inter';
+  document.getElementById('overlay-bold').checked = !!overlay.bold;
+  document.getElementById('overlay-italic').checked = !!overlay.italic;
+
+  // Shadow — figure out which preset the stored overlay matches, if any.
+  const preset = matchShadowPreset(overlay);
+  document.getElementById('overlay-shadow-preset').value = preset;
+  document.getElementById('overlay-shadow-color').value =
+    overlay.shadow_color ? ffmpegColorToHex(overlay.shadow_color) : '#000000';
+  document.getElementById('overlay-shadow-x').value = overlay.shadow_x || 2;
+  document.getElementById('overlay-shadow-x-val').textContent = overlay.shadow_x || 2;
+  document.getElementById('overlay-shadow-y').value = overlay.shadow_y || 2;
+  document.getElementById('overlay-shadow-y-val').textContent = overlay.shadow_y || 2;
+  document.getElementById('overlay-shadow-custom').style.display = preset === 'custom' ? 'flex' : 'none';
+
+  // Position grid
+  document.querySelectorAll('#overlay-position-grid .overlay-pos-cell').forEach(c => c.classList.remove('active'));
+  const pos = overlay.position || 'bot-center';
+  const cell = document.querySelector(`#overlay-position-grid .overlay-pos-cell[data-pos="${pos}"]`);
+  if (cell) cell.classList.add('active');
+
+  // Point the preview at the same source as the card.
+  const previewUrl = `${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(key)}/preview?t=${item ? item.regen_count || 0 : 0}`;
+  const videoEl = document.getElementById('overlay-preview-video');
+  const imgEl = document.getElementById('overlay-preview-image');
+  if (item && item.source_type === 'image') {
+    imgEl.src = previewUrl;
+    imgEl.style.display = '';
+    videoEl.style.display = 'none';
+    try { videoEl.pause(); } catch (_) {}
+    videoEl.removeAttribute('src');
+  } else {
+    videoEl.src = previewUrl;
+    videoEl.style.display = '';
+    imgEl.style.display = 'none';
+    videoEl.play().catch(() => {}); // muted autoplay is allowed
+  }
+
+  // Match the preview frame's aspect to the actual output aspect.
+  const dims = ASPECT_DIMS[state.aspect_ratio] || ASPECT_DIMS.landscape;
+  const frame = document.getElementById('overlay-preview-frame');
+  if (frame) frame.style.aspectRatio = `${dims.w} / ${dims.h}`;
+
+  // Reset the server-preview state — any previously rendered file is for
+  // a different clip/overlay combination.
+  overlayServerPreviewTs = 0;
+
+  document.getElementById('overlay-editor-backdrop').style.display = 'flex';
+  // Run after layout so the preview frame has its final width.
+  requestAnimationFrame(updateOverlayPreview);
+}
+
+function closeOverlayEditor(event) {
+  if (event && event.target.id !== 'overlay-editor-backdrop') return;
+  const modal = document.getElementById('overlay-editor-backdrop');
+  if (modal) modal.style.display = 'none';
+  // Stop the video so it doesn't keep playing behind the scenes.
+  const videoEl = document.getElementById('overlay-preview-video');
+  if (videoEl) { try { videoEl.pause(); } catch (_) {} videoEl.removeAttribute('src'); }
+  visualReviewEditingKey = null;
+}
+
+function colorNameToHex(name) {
+  if (!name) return '';
+  if (typeof name !== 'string') return '';
+  if (name.startsWith('#')) return name;
+  // Use a temp element to resolve named colors to hex.
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.fillStyle = name;
+  return ctx.fillStyle;
+}
+
+// "black@0.5" or "#rrggbb@0.5" → "#rrggbb" (we ignore the alpha here;
+// the color picker doesn't have an alpha channel, alpha lives on the
+// preset). Returns "#000000" as a safe fallback.
+function ffmpegColorToHex(c) {
+  if (!c) return '#000000';
+  const atIdx = c.indexOf('@');
+  const base = atIdx >= 0 ? c.slice(0, atIdx) : c;
+  return colorNameToHex(base) || '#000000';
+}
+
+// hex (#rrggbb) + alpha (0..1) → "rrggbb@a" (FFmpeg format).
+function hexToFFmpegColor(hex, alpha) {
+  if (!hex) return '';
+  const clean = hex.startsWith('#') ? hex.slice(1) : hex;
+  if (alpha != null && alpha >= 0 && alpha < 1) {
+    return `0x${clean}@${alpha}`;
+  }
+  return `0x${clean}`;
+}
+
+// Decide which preset best matches a stored overlay's shadow fields.
+function matchShadowPreset(overlay) {
+  if (!overlay || !overlay.shadow_color) return 'none';
+  if (overlay.glow) return 'glow';
+  for (const name of ['soft', 'hard', 'long']) {
+    const p = SHADOW_PRESETS[name].ffmpeg;
+    if (p && p.shadow_x === (overlay.shadow_x || 0) && p.shadow_y === (overlay.shadow_y || 0) && p.shadow_color === overlay.shadow_color) {
+      return name;
+    }
+  }
+  return 'custom';
+}
+
+// Read current modal state and update the live HTML preview overlay.
+function updateOverlayPreview() {
+  const box = document.getElementById('overlay-preview-textbox');
+  if (!box) return;
+
+  const text = document.getElementById('overlay-text').value || 'Preview text';
+  const size = parseInt(document.getElementById('overlay-size').value, 10) || 48;
+  const color = document.getElementById('overlay-color').value || '#ffffff';
+  const family = document.getElementById('overlay-font').value || 'Inter';
+  const bold = document.getElementById('overlay-bold').checked;
+  const italic = document.getElementById('overlay-italic').checked;
+  const boxOn = document.getElementById('overlay-box').checked;
+  const presetKey = document.getElementById('overlay-shadow-preset').value;
+  const pos = document.querySelector('#overlay-position-grid .overlay-pos-cell.active')?.dataset.pos || 'bot-center';
+
+  // Scale font size from source-frame coordinates to the preview's pixel
+  // size so a "48px in 1920px wide source" looks proportional in the modal.
+  const dims = ASPECT_DIMS[state.aspect_ratio] || ASPECT_DIMS.landscape;
+  const frame = document.getElementById('overlay-preview-frame');
+  const previewW = frame ? frame.clientWidth || 320 : 320;
+  const scale = previewW / dims.w;
+  const renderSize = Math.max(8, size * scale);
+
+  // Reset position-related styles before applying the active cell's rules.
+  ['top', 'bottom', 'left', 'right', 'transform'].forEach(p => { box.style[p] = ''; });
+  Object.assign(box.style, OVERLAY_POSITION_CSS[pos] || OVERLAY_POSITION_CSS['bot-center']);
+
+  // Font + colour + box.
+  box.textContent = text;
+  box.style.fontFamily = `'${cssFontFamily(family)}', sans-serif`;
+  box.style.fontSize = renderSize + 'px';
+  box.style.color = color;
+  box.style.fontWeight = bold ? '700' : '400';
+  box.style.fontStyle = italic ? 'italic' : 'normal';
+  box.style.background = boxOn ? 'rgba(0,0,0,0.5)' : 'transparent';
+  box.style.padding = boxOn ? '4px 10px' : '0';
+
+  // Shadow: combine the preset baseline with the always-present outline
+  // (matches drawtext's borderw=2:bordercolor=black@0.6 on the main pass).
+  const outline = '0 0 0 transparent, 0 1px 0 rgba(0,0,0,0.6), 1px 0 0 rgba(0,0,0,0.6), -1px 0 0 rgba(0,0,0,0.6), 0 -1px 0 rgba(0,0,0,0.6)';
+  let shadow = '';
+  if (presetKey === 'custom') {
+    const sx = parseInt(document.getElementById('overlay-shadow-x').value, 10) || 0;
+    const sy = parseInt(document.getElementById('overlay-shadow-y').value, 10) || 0;
+    const sc = document.getElementById('overlay-shadow-color').value || '#000000';
+    if (sx !== 0 || sy !== 0) {
+      shadow = `${sx}px ${sy}px 3px ${sc}`;
+    }
+  } else {
+    const preset = SHADOW_PRESETS[presetKey];
+    if (preset && preset.css) {
+      const s = preset.css;
+      shadow = `${s.x}px ${s.y}px ${s.blur}px ${s.color}`;
+    }
+  }
+  box.style.textShadow = shadow ? `${shadow}, ${outline}` : outline;
+
+  // Toggle the custom X/Y sliders visibility based on preset.
+  const customRow = document.getElementById('overlay-shadow-custom');
+  if (customRow) customRow.style.display = presetKey === 'custom' ? 'flex' : 'none';
+}
+
+// Map our internal family names to a CSS font-family the browser can find.
+// The browser doesn't know about our bundled TTFs, so we map to a similar
+// system font for the preview. The actual rendered video uses the TTFs in
+// assets/fonts/ via FFmpeg drawtext.
+function cssFontFamily(name) {
+  switch (name) {
+    case 'Inter':            return 'Inter, "Segoe UI", system-ui';
+    case 'Roboto':           return 'Roboto, "Segoe UI", system-ui';
+    case 'Montserrat':       return 'Montserrat, "Segoe UI", system-ui';
+    case 'PlayfairDisplay':  return '"Playfair Display", "Times New Roman", Georgia, serif';
+    case 'Bebas':            return '"Bebas Neue", Impact, "Arial Black", sans-serif';
+    default:                 return name + ', "Segoe UI", system-ui';
+  }
+}
+
+// Build the TextOverlay JSON to send to the backend from the current UI.
+function buildOverlayPayloadFromUI() {
+  const activeCell = document.querySelector('#overlay-position-grid .overlay-pos-cell.active');
+  const presetKey = document.getElementById('overlay-shadow-preset').value;
+  const preset = SHADOW_PRESETS[presetKey];
+
+  let shadow = { shadow_color: '', shadow_x: 0, shadow_y: 0, glow: false };
+  if (presetKey === 'custom') {
+    const sx = parseInt(document.getElementById('overlay-shadow-x').value, 10) || 0;
+    const sy = parseInt(document.getElementById('overlay-shadow-y').value, 10) || 0;
+    const sc = document.getElementById('overlay-shadow-color').value || '#000000';
+    shadow = {
+      shadow_color: (sx === 0 && sy === 0) ? '' : hexToFFmpegColor(sc, 0.85),
+      shadow_x: sx,
+      shadow_y: sy,
+      glow: false,
+    };
+  } else if (preset && preset.ffmpeg) {
+    shadow = { ...preset.ffmpeg };
+    // If the user picked a non-default shadow color, override the preset's.
+    const sc = document.getElementById('overlay-shadow-color').value;
+    if (sc && sc !== '#000000' && shadow.shadow_color !== '') {
+      // Preserve the preset's alpha but swap the base RGB.
+      const atIdx = shadow.shadow_color.indexOf('@');
+      const alphaSuffix = atIdx >= 0 ? shadow.shadow_color.slice(atIdx) : '';
+      shadow.shadow_color = hexToFFmpegColor(sc) + alphaSuffix.replace('0x', '');
+    }
+  }
+
+  return {
+    text: document.getElementById('overlay-text').value.trim(),
+    position: activeCell ? activeCell.dataset.pos : 'bot-center',
+    font_size: parseInt(document.getElementById('overlay-size').value, 10) || 48,
+    font_color: document.getElementById('overlay-color').value || 'white',
+    box_color: document.getElementById('overlay-box').checked ? 'black@0.5' : '',
+    fade_in: document.getElementById('overlay-fade').checked,
+
+    font_family: document.getElementById('overlay-font').value || 'Inter',
+    bold: document.getElementById('overlay-bold').checked,
+    italic: document.getElementById('overlay-italic').checked,
+
+    shadow_color: shadow.shadow_color,
+    shadow_x: shadow.shadow_x,
+    shadow_y: shadow.shadow_y,
+    glow: shadow.glow,
+  };
+}
+
+async function saveOverlay() {
+  if (!visualReviewEditingKey || !currentJobId) {
+    closeOverlayEditor();
+    return;
+  }
+  const body = buildOverlayPayloadFromUI();
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(visualReviewEditingKey)}/overlay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Failed to save overlay: ' + (err.error || res.statusText));
+      return;
+    }
+    await reloadVisualReview();
+    closeOverlayEditor();
+  } catch (err) {
+    alert('Failed to save overlay: ' + err.message);
+  }
+}
+
+async function clearOverlay() {
+  if (!visualReviewEditingKey || !currentJobId) return;
+  try {
+    await fetch(`${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(visualReviewEditingKey)}/overlay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: '' }),
+    });
+    await reloadVisualReview();
+    closeOverlayEditor();
+  } catch (err) {
+    alert('Failed to remove overlay: ' + err.message);
+  }
+}
+
+// Trigger a backend FFmpeg render so the preview shows the *exact* drawtext
+// output. Replaces the HTML overlay with the rendered video on success.
+async function renderServerOverlayPreview() {
+  if (!visualReviewEditingKey || !currentJobId) return;
+  const btn = document.getElementById('btn-overlay-server-preview');
+  const body = buildOverlayPayloadFromUI();
+  if (!body.text) {
+    alert('Enter some text first.');
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Rendering…'; }
+  try {
+    const res = await fetch(`${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(visualReviewEditingKey)}/overlay-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Preview render failed: ' + (err.error || res.statusText));
+      return;
+    }
+    const data = await res.json();
+    overlayServerPreviewTs = data.ts || Date.now();
+    const url = `${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(visualReviewEditingKey)}/overlay-preview?ts=${overlayServerPreviewTs}`;
+    const videoEl = document.getElementById('overlay-preview-video');
+    const imgEl = document.getElementById('overlay-preview-image');
+    if (videoEl) {
+      videoEl.src = url;
+      videoEl.style.display = '';
+      videoEl.play().catch(() => {});
+    }
+    if (imgEl) imgEl.style.display = 'none';
+    // Hide the HTML overlay since the rendered version has the text baked in.
+    const textbox = document.getElementById('overlay-preview-textbox');
+    if (textbox) textbox.style.visibility = 'hidden';
+  } catch (err) {
+    alert('Preview render failed: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🎬 Render real preview'; }
+  }
+}
+
+function openClipFullPreview(key) {
+  const item = visualReviewClips.find(c => c.key === key);
+  if (!item) return;
+  const url = `${API}/api/jobs/${currentJobId}/clips/${encodeURIComponent(key)}/preview?t=${item.regen_count || 0}`;
+  window.open(url, '_blank');
+}
+
+// Wire up live updates inside the overlay editor.
+document.addEventListener('DOMContentLoaded', () => {
+  // Re-render the HTML preview on any control change.
+  const watchedIds = [
+    'overlay-text',
+    'overlay-size',
+    'overlay-color',
+    'overlay-font',
+    'overlay-bold',
+    'overlay-italic',
+    'overlay-box',
+    'overlay-fade',
+    'overlay-shadow-preset',
+    'overlay-shadow-color',
+    'overlay-shadow-x',
+    'overlay-shadow-y',
+  ];
+  watchedIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const evt = (el.type === 'range' || el.type === 'text' || el.type === 'color') ? 'input' : 'change';
+    el.addEventListener(evt, () => {
+      // Show the HTML overlay again whenever a control changes (the server
+      // preview becomes stale the moment the user edits anything).
+      const textbox = document.getElementById('overlay-preview-textbox');
+      if (textbox) textbox.style.visibility = '';
+      updateOverlayPreview();
+    });
+  });
+
+  const sizeInput = document.getElementById('overlay-size');
+  if (sizeInput) {
+    sizeInput.addEventListener('input', e => {
+      const v = e.target.value;
+      const out = document.getElementById('overlay-size-val');
+      if (out) out.textContent = v;
+    });
+  }
+  ['overlay-shadow-x', 'overlay-shadow-y'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', e => {
+      const out = document.getElementById(id + '-val');
+      if (out) out.textContent = e.target.value;
+    });
+  });
+
+  const grid = document.getElementById('overlay-position-grid');
+  if (grid) {
+    grid.addEventListener('click', e => {
+      const cell = e.target.closest('.overlay-pos-cell');
+      if (!cell) return;
+      grid.querySelectorAll('.overlay-pos-cell').forEach(c => c.classList.remove('active'));
+      cell.classList.add('active');
+      const textbox = document.getElementById('overlay-preview-textbox');
+      if (textbox) textbox.style.visibility = '';
+      updateOverlayPreview();
+    });
+  }
+
+  // Re-render the preview if the modal/window resizes so the font-size
+  // scaling stays correct.
+  window.addEventListener('resize', () => {
+    if (document.getElementById('overlay-editor-backdrop')?.style.display === 'flex') {
+      updateOverlayPreview();
+    }
+  });
+});
 
 // ---- Trim Controls ----
 let videoDuration = 0;
@@ -901,6 +2269,18 @@ function formatTime(seconds) {
 document.addEventListener('DOMContentLoaded', initTrimControls);
 document.addEventListener('DOMContentLoaded', () => {
   if (typeof updateVisualsPreview === 'function') updateVisualsPreview();
+  // Seed the AI music prompt preview from the default preset so the user
+  // sees real text the first time they open the wizard's music step.
+  const promptInput = document.getElementById('ai-music-prompt');
+  if (promptInput && typeof aiMusicPresets !== 'undefined') {
+    const seed = aiMusicPresets[state.music_preset] || aiMusicPresets.peaceful_aesthetic;
+    promptInput.value = seed.prompt;
+    state.music_ambience = seed.ambience.slice();
+    document.querySelectorAll('.ambience-chip').forEach(chip => {
+      chip.classList.toggle('active', state.music_ambience.includes(chip.dataset.ambience));
+    });
+    if (typeof updateAIMusicPromptPreview === 'function') updateAIMusicPromptPreview();
+  }
 });
 
 // ---- Jobs List ----
@@ -926,6 +2306,7 @@ async function loadJobs() {
           ${j.status === 'completed' ? `<a href="${API}/api/jobs/${j.id}/download" style="color:var(--accent);font-size:12px">⬇ Download</a>` : ''}
           ${j.status === 'failed' ? `<span onclick="retryJob('${j.id}')" style="color:var(--warning);cursor:pointer;font-size:12px">🔄 Retry</span>` : ''}
           ${j.status === 'pending_approval' ? `<span onclick="reviewJob('${j.id}')" style="color:var(--accent);cursor:pointer;font-size:12px">👀 Review</span>` : ''}
+          ${j.status === 'pending_visual_review' ? `<span onclick="reviewClips('${j.id}')" style="color:var(--accent);cursor:pointer;font-size:12px">🎬 Review Clips</span>` : ''}
         </td>
       </tr>
     `).join('');
@@ -952,6 +2333,17 @@ function reviewJob(id) {
   videoEl.src = `${API}/api/jobs/${id}/download`;
   videoEl.load();
   connectWebSocket(id);
+}
+
+// Re-open the per-clip review screen for a job that's already paused at
+// pending_visual_review (e.g. after a page refresh).
+function reviewClips(id) {
+  currentJobId = id;
+  showPage('create');
+  showProgress(id);
+  updateStep(4, 'done', 'Visuals fetched! Review and approve clips before rendering.');
+  connectWebSocket(id);
+  openVisualReview(id);
 }
 
 // ---- Settings ----
@@ -1159,7 +2551,13 @@ function approveScript() {
   
   // Lock in the script
   state.pre_generated_script = currentDraftScript;
-  
+
+  // The recommenders key off the script; a new approval may follow several
+  // refinement rounds, so re-enable the banner the user may have dismissed
+  // earlier against a different draft.
+  voiceRecDismissed = false;
+  musicRecDismissed = false;
+
   // Hide chat container
   document.getElementById('script-chat-container').style.display = 'none';
   document.getElementById('btn-gen-script').style.display = 'none';
