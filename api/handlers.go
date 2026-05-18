@@ -396,11 +396,16 @@ func handleClipPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/jobs/{id}/clips/{key}/regenerate — Regenerate one clip in place.
-// Body (optional): {"query": "...", "source_type": "clip"|"image"}
+// Body (optional): {"query": "...", "source_type": "clip"|"image", "description": "..."}
 //   - When body is empty, regenerates with the same query and type but the
 //     dedup tracker forces a different Pexels asset / new AI roll.
-//   - When provided, the new query/type override the stored values for this
-//     clip going forward.
+//   - When `query` is provided it overrides the stored Pexels search term
+//     AND the AI-image prompt (the UI uses a single input for both).
+//   - When `description` is also provided it takes precedence over the
+//     query→description sync (intended for future advanced UI; the current
+//     single-input UI doesn't need to send it).
+//   - When `source_type` is provided the clip is forcibly regenerated as a
+//     stock clip or AI image regardless of how it was originally produced.
 func handleRegenerateClip(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	key := r.PathValue("key")
@@ -419,8 +424,9 @@ func handleRegenerateClip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Query      string `json:"query"`
-		SourceType string `json:"source_type"`
+		Query       string `json:"query"`
+		SourceType  string `json:"source_type"`
+		Description string `json:"description"`
 	}
 	// An empty body is fine — clients can POST with no payload to "give me
 	// a different one" without changing anything else.
@@ -431,7 +437,7 @@ func handleRegenerateClip(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	item, err := pipeline.RegenerateOneVisual(job, key, body.Query, body.SourceType)
+	item, err := pipeline.RegenerateOneVisual(job, key, body.Query, body.SourceType, body.Description)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Regenerate failed: "+err.Error())
 		return

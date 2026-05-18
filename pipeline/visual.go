@@ -256,13 +256,25 @@ func fetchOneVisual(
 
 // RegenerateOneVisual regenerates a single visual identified by key. Used by
 // the review-screen API to refresh a clip the user didn't like. Optionally
-// overrides the search query and/or source type ("clip" | "image"); empty
-// strings keep the existing values.
+// overrides the search query, AI image description, and/or source type
+// ("clip" | "image"); empty strings keep the existing values.
+//
+// Important nuance: the review-screen UI has a single "Search query / AI
+// prompt" input box. When the user retypes that field, we sync the new
+// text into BOTH item.Query (used as the Pexels search term for stock
+// clips) AND item.Description (used as the prompt for AI image generation).
+// Without this sync, AI-image regenerations would keep using the original
+// LLM-tagged description and produce the same image even when the user
+// explicitly typed a new prompt — see the regression that motivated this
+// behaviour.
+//
+// Callers needing distinct query/description (e.g. a future advanced UI)
+// can pass an explicit newDescription to override only the description.
 //
 // On success the JobContext's ClipFiles, ClipReview, and on-disk file are
 // all updated. The per-job dedup tracker (if present) is reused so the
 // regenerated clip won't duplicate any other visual in the same video.
-func RegenerateOneVisual(job *models.JobContext, key, newQuery, newSourceType string) (*models.ClipReviewItem, error) {
+func RegenerateOneVisual(job *models.JobContext, key, newQuery, newSourceType string, newDescription ...string) (*models.ClipReviewItem, error) {
 	item := job.GetClipReview(key)
 	if item == nil {
 		return nil, fmt.Errorf("no review item for key %q", key)
@@ -271,13 +283,28 @@ func RegenerateOneVisual(job *models.JobContext, key, newQuery, newSourceType st
 		return nil, fmt.Errorf("regeneration not supported in manual video mode")
 	}
 
+	prevQuery := item.Query
+	prevDescription := item.Description
+
 	if newQuery != "" {
 		item.Query = newQuery
+		// Sync to description so AI image generation also picks up the new
+		// prompt. The UI uses one input for both concepts.
+		item.Description = newQuery
+	}
+	// Explicit description override (variadic so existing callers stay
+	// source-compatible). Takes precedence over the query-sync above when
+	// the caller wants distinct values for the two fields.
+	if len(newDescription) > 0 && strings.TrimSpace(newDescription[0]) != "" {
+		item.Description = strings.TrimSpace(newDescription[0])
 	}
 	requestedType := item.SourceType
 	if newSourceType == "clip" || newSourceType == "image" {
 		requestedType = newSourceType
 	}
+
+	log.Printf("🔁 Regen clip key=%s type=%s→%s query=%q→%q description=%q→%q",
+		key, item.SourceType, requestedType, prevQuery, item.Query, prevDescription, item.Description)
 
 	jobDir := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", job.JobID), "segments")
 	if err := os.MkdirAll(jobDir, 0755); err != nil {

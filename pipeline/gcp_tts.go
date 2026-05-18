@@ -37,8 +37,12 @@ type gcpSynthesizeRequest struct {
 	AudioConfig gcpAudioConfig `json:"audioConfig"`
 }
 
+// gcpInput is a oneof — exactly one of Text or SSML should be set. We use
+// `omitempty` so the unused field is absent from the JSON (the API rejects
+// requests with both set).
 type gcpInput struct {
-	Text string `json:"text"`
+	Text string `json:"text,omitempty"`
+	SSML string `json:"ssml,omitempty"`
 }
 
 type gcpVoiceParams struct {
@@ -179,13 +183,42 @@ func SynthesizeGCPTTS(text, voiceName, languageCode, apiKey, outputPath string) 
 	return nil
 }
 
+// SynthesizeGCPTTSSSML calls Google Cloud TTS with an SSML payload and
+// writes the resulting MP3 to outputPath. The SSML string must be a
+// complete <speak>…</speak> document — see pipeline.RenderSegmentSSML.
+//
+// Google bills the full SSML string (tags included, except <mark>), so
+// callers should be mindful of payload size for cost-sensitive workloads.
+func SynthesizeGCPTTSSSML(ssml, voiceName, languageCode, apiKey, outputPath string) error {
+	audioBytes, err := SynthesizeGCPTTSSSMLToBytes(ssml, voiceName, languageCode, apiKey)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(outputPath, audioBytes, 0644); err != nil {
+		return fmt.Errorf("write GCP TTS SSML audio file: %w", err)
+	}
+	return nil
+}
+
+// SynthesizeGCPTTSSSMLToBytes is the SSML-input twin of
+// SynthesizeGCPTTSToBytes — returns MP3 bytes for previews.
+func SynthesizeGCPTTSSSMLToBytes(ssml, voiceName, languageCode, apiKey string) ([]byte, error) {
+	return synthesizeGCPTTS(gcpInput{SSML: ssml}, voiceName, languageCode, apiKey)
+}
+
 // SynthesizeGCPTTSToBytes is like SynthesizeGCPTTS but returns the MP3 bytes
 // directly (used for preview).
 func SynthesizeGCPTTSToBytes(text, voiceName, languageCode, apiKey string) ([]byte, error) {
+	return synthesizeGCPTTS(gcpInput{Text: text}, voiceName, languageCode, apiKey)
+}
+
+// synthesizeGCPTTS is the shared HTTP/auth wrapper for both text and SSML
+// inputs. Caller picks the input kind via the input parameter.
+func synthesizeGCPTTS(input gcpInput, voiceName, languageCode, apiKey string) ([]byte, error) {
 	premium := isGCPVoicePremium(voiceName)
 
 	reqBody := gcpSynthesizeRequest{
-		Input: gcpInput{Text: text},
+		Input: input,
 		Voice: gcpVoiceParams{
 			LanguageCode: languageCode,
 			Name:         voiceName,

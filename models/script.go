@@ -28,6 +28,25 @@ type ScriptSegment struct {
 	MusicMood   string       `json:"music_mood"`    // dramatic | calm | upbeat | mysterious
 	Transition  string       `json:"transition"`    // fade | cut | slide
 	SubVisuals  []SubVisual  `json:"sub_visuals,omitempty"` // fine-grained visual cues within this segment
+
+	// Sentences carries per-sentence emotion + prosody hints used by SSML
+	// rendering for GCP TTS. Optional — when empty, the voiceover stage falls
+	// back to plain-text synthesis. Populated by the emotion-tagging stage
+	// that runs just before voiceover synthesis when VoiceoverMode = gcp_tts.
+	Sentences []ScriptSentence `json:"sentences,omitempty"`
+}
+
+// ScriptSentence is one sentence within a segment carrying emotion + prosody
+// hints. The voiceover stage uses these to build expressive SSML.
+//
+// Emotion vocabulary is fixed (see pipeline.ValidEmotions) so the SSML
+// renderer can map deterministically to a prosody preset.
+type ScriptSentence struct {
+	Text       string   `json:"text"`
+	Emotion    string   `json:"emotion"`               // neutral | excited | dramatic | somber | curious | whispered | playful
+	Pace       string   `json:"pace,omitempty"`        // slow | normal | fast — overrides the emotion's default rate when set
+	Emphasis   []string `json:"emphasis,omitempty"`    // 0-2 words inside Text to stress
+	PrePauseMs int      `json:"pre_pause_ms,omitempty"` // silence before this sentence, in ms (200/400/600/800)
 }
 
 // SubVisual is one visual asset shown within a segment.

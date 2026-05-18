@@ -192,6 +192,37 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 			return fmt.Errorf("GCP TTS not configured — set GOOGLE_CLOUD_TTS_API_KEY (basic voices) and/or GOOGLE_APPLICATION_CREDENTIALS_JSON (premium voices like Chirp 3 HD), or switch to another voiceover mode")
 		}
 
+		// SSML emotion path is opt-out via VIDFORGE_DISABLE_SSML=1 so users
+		// can fall back to flat text synthesis if the LLM tagging ever
+		// misbehaves on a specific script. Defaults to ON.
+		ssmlEnabled := strings.TrimSpace(os.Getenv("VIDFORGE_DISABLE_SSML")) == ""
+
+		// Tag the whole script's emotions in one pass before we start
+		// synthesising. Doing it up front means: (1) cost preview is
+		// available before any audio is generated, (2) a single Groq call
+		// can be batched per segment, and (3) the tags are persisted to
+		// script.json so the UI can show them.
+		if ssmlEnabled {
+			progress(models.ProgressEvent{
+				JobID: job.JobID, Stage: 3, StageName: "Voiceover",
+				ProgressPct: 5,
+				Message:     "Tagging per-sentence emotion for expressive delivery...",
+				Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			})
+			TagScriptEmotions(job.Script, payload.ScriptTone)
+			// Persist the enriched script so the UI / debugging tools can
+			// see the tags — same approach reconcileScriptDurations uses.
+			jobRoot := filepath.Join(config.App.WorkspaceDir, fmt.Sprintf("job_%s", job.JobID))
+			if scriptJSON, mErr := json.MarshalIndent(job.Script, "", "  "); mErr == nil {
+				_ = os.WriteFile(filepath.Join(jobRoot, "script.json"), scriptJSON, 0644)
+			}
+			// Re-read segments — TagScriptEmotions mutates in place but
+			// `segments` here is a snapshot of the slice header.
+			segments = job.Script.Segments
+		}
+
+		var totalBilledChars int
+
 		for i, seg := range segments {
 			pct := int(float64(i+1) / float64(len(segments)) * 90)
 			progress(models.ProgressEvent{
@@ -203,10 +234,35 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 
 			outputPath := filepath.Join(jobDir, fmt.Sprintf("seg_%02d_voice.mp3", seg.SegmentID))
 
+			// Pick the synthesis path: SSML when sentences are tagged AND
+			// SSML hasn't been disabled, plain text otherwise.
+			useSSML := ssmlEnabled && len(seg.Sentences) > 0
+			var ssmlPayload string
+			if useSSML {
+				ssmlPayload = RenderSegmentSSML(seg)
+				totalBilledChars += EstimateSSMLBilledChars(ssmlPayload)
+			} else {
+				totalBilledChars += len(seg.Text)
+			}
+
 			var lastErr error
 			for attempt := 1; attempt <= 3; attempt++ {
-				if err := SynthesizeGCPTTS(seg.Text, payload.GCPVoiceName, payload.GCPLanguageCode, gcpKey, outputPath); err != nil {
+				var err error
+				if useSSML {
+					err = SynthesizeGCPTTSSSML(ssmlPayload, payload.GCPVoiceName, payload.GCPLanguageCode, gcpKey, outputPath)
+				} else {
+					err = SynthesizeGCPTTS(seg.Text, payload.GCPVoiceName, payload.GCPLanguageCode, gcpKey, outputPath)
+				}
+				if err != nil {
 					lastErr = err
+					// SSML can occasionally fail with malformed-payload errors
+					// (rare LLM output edge case). On the second retry, drop
+					// down to plain text so the user still gets audio.
+					if useSSML && attempt == 2 {
+						log.Printf("⚠️ Job %s seg %d: SSML synth failed twice (%v) — falling back to plain text",
+							job.JobID[:8], seg.SegmentID, err)
+						useSSML = false
+					}
 					time.Sleep(time.Duration(attempt*10) * time.Second)
 					continue
 				}
@@ -219,6 +275,12 @@ func RunVoiceover(job *models.JobContext, progress ProgressFunc) error {
 
 			job.VoiceFiles[fmt.Sprintf("%d", seg.SegmentID)] = outputPath
 		}
+
+		if ssmlEnabled {
+			log.Printf("📊 Job %s — GCP TTS billed ~%d chars (SSML included) for voice %q",
+				job.JobID[:8], totalBilledChars, payload.GCPVoiceName)
+		}
+
 		reconcileScriptDurations(job)
 		return nil
 	}
