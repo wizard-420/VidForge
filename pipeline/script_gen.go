@@ -49,7 +49,7 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			})
 
-			script, err = generateLongScript(payload.RawInput, payload.DurationMin, wordCount, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+			script, err = generateLongScript(payload.RawInput, payload.DurationMin, wordCount, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount, payload.SecondsPerVisual)
 			if err != nil {
 				return fmt.Errorf("long script generation: %w", err)
 			}
@@ -65,7 +65,7 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			})
 
-			shortScript, err := generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount)
+			shortScript, err := generateShortScript(payload.RawInput, payload.ScriptTone, payload.Language, payload.ClipCount, payload.ImageCount, payload.SecondsPerVisual)
 			if err != nil {
 				// Non-fatal: log and continue with long only
 				job.AddError(fmt.Sprintf("Short script generation failed: %v", err))
@@ -91,6 +91,11 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 	if script == nil {
 		return fmt.Errorf("no script generated")
 	}
+
+	// Pacing safety net: even though we instruct the LLM to follow the pacing
+	// guideline, it doesn't always obey perfectly. Enforce it here so the
+	// user's "seconds per visual" choice is respected regardless of LLM output.
+	enforceVisualPacing(script, payload.SecondsPerVisual)
 
 	// Compute totals
 	script.TotalSegments = len(script.Segments)
@@ -123,17 +128,20 @@ func RunScriptGenerator(job *models.JobContext, progress ProgressFunc) error {
 	return nil
 }
 
-func generateLongScript(topic string, durationMin, wordCount int, tone, language string, clipCount, imageCount int) (*models.ScriptDocument, error) {
+func generateLongScript(topic string, durationMin, wordCount int, tone, language string, clipCount, imageCount, secondsPerVisual int) (*models.ScriptDocument, error) {
 	totalVisuals := clipCount + imageCount
+	if secondsPerVisual <= 0 {
+		secondsPerVisual = 6
+	}
 	systemPrompt := fmt.Sprintf(`You are an expert YouTube scriptwriter for faceless channels. You write scripts that:
 - Open with a 5-second hook that creates immediate curiosity
 - Use short, punchy sentences optimised for text-to-speech voiceover
 - Maintain a %s tone throughout
 - Include dramatic pauses (marked as [PAUSE])
 - End with a strong CTA (like, subscribe, comment)
-- For each segment, provide fine-grained sub_visuals: multiple visual changes within each segment to keep the audience engaged
+- For each segment, provide fine-grained sub_visuals at a calm, natural pace — visuals should change roughly once every %d seconds, NOT faster.
 
-IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone)
+IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone, secondsPerVisual)
 
 	userPrompt := fmt.Sprintf(`Write a complete YouTube script for this topic: "%s"
 Target duration: %d minutes (~%d words at 130 words/minute)
@@ -167,13 +175,17 @@ Return ONLY valid JSON matching this exact schema:
   ]
 }
 
-CRITICAL VISUAL RULES:
-- Generate exactly %d total sub_visuals across ALL segments (%d clips + %d images).
-- Distribute them proportionally across segments based on each segment's duration.
+VISUAL PACING RULES (most important):
+- Aim for ONE sub_visual roughly every %d seconds of narration. Do NOT cram in more.
+- For a segment of duration D seconds, generate approximately ceil(D / %d) sub_visuals (e.g. a 30s segment → ~%d sub_visuals at this pacing).
+- Total budget across the entire script: about %d sub_visuals (%d clips + %d images). NEVER exceed this; fewer is fine if it serves the narrative.
+- Hook and CTA segments should have FEWER sub_visuals (1-2 each) to let the message land.
+- Body segments scale with their length using the pacing rule above.
+
+OTHER VISUAL RULES:
 - Each sub_visual query MUST be 2-4 words optimized for Pexels stock video search.
 - Each sub_visual MUST semantically match the SPECIFIC words being narrated at that point in the segment text.
-  Example: If the text mentions "nine planets", you need visuals for each planet being discussed.
-  If the text mentions "Mars has a red surface", the sub_visual at that point must be "mars red surface planet".
+  Example: If the text mentions "Mars has a red surface", the sub_visual at that point must be "mars red surface planet".
 - Set type to "clip" for stock footage, "image" for AI-generated images.
 - NEVER repeat the same query across sub_visuals. Each must be unique.
 - ALWAYS include the main subject in every query (e.g., "mars red surface" not just "red surface").
@@ -181,23 +193,27 @@ CRITICAL VISUAL RULES:
 Generate at least %d segments to fill %d minutes. Each segment should be 30-90 seconds.
 The first segment type must be "hook", the last must be "cta", and all others "body".`,
 		topic, durationMin, wordCount, tone, language,
+		secondsPerVisual, secondsPerVisual, max(30/secondsPerVisual, 1),
 		totalVisuals, clipCount, imageCount,
 		max(durationMin/2, 4), durationMin)
 
 	return callGroqForScript(systemPrompt, userPrompt)
 }
 
-func generateShortScript(topic, tone, language string, clipCount, imageCount int) (*models.ScriptDocument, error) {
+func generateShortScript(topic, tone, language string, clipCount, imageCount, secondsPerVisual int) (*models.ScriptDocument, error) {
 	totalVisuals := clipCount + imageCount
+	if secondsPerVisual <= 0 {
+		secondsPerVisual = 4 // shorts default a bit faster than long-form
+	}
 	systemPrompt := fmt.Sprintf(`You are an expert YouTube Shorts scriptwriter for faceless channels. You write viral short-form scripts that:
 - Hook must be in the FIRST 3 words (no slow intros)
 - Maximum 130 words total
 - One single revelation or fact that makes the viewer share it
 - End with a direct question to drive comments
 - Maintain a %s tone
-- Provide fine-grained sub_visuals for fast-paced visual changes
+- Provide sub_visuals at a deliberate pace — visuals change roughly every %d seconds, NOT every word.
 
-IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone)
+IMPORTANT: Return ONLY valid JSON, no markdown code blocks, no explanations.`, tone, secondsPerVisual)
 
 	userPrompt := fmt.Sprintf(`Write a 45-60 second YouTube Shorts script for: "%s"
 Tone: %s
@@ -235,19 +251,87 @@ Return ONLY valid JSON matching this schema:
   ]
 }
 
-CRITICAL VISUAL RULES:
-- Generate exactly %d total sub_visuals across ALL segments (%d clips + %d images).
-- Distribute them proportionally across segments based on each segment's duration.
+VISUAL PACING RULES (most important):
+- Aim for ONE sub_visual roughly every %d seconds. Do NOT cram in more.
+- For a segment of duration D seconds, generate approximately ceil(D / %d) sub_visuals.
+- Total budget: about %d sub_visuals (%d clips + %d images). NEVER exceed this.
+
+OTHER VISUAL RULES:
 - Each sub_visual query MUST be 2-4 words optimized for Pexels stock video search.
 - Each sub_visual MUST semantically match the SPECIFIC words being narrated at that point.
 - Set type to "clip" for stock footage, "image" for AI-generated images.
 - NEVER repeat the same query. Each must be unique.
 - ALWAYS include the main subject in every query.
 
-Generate 4-6 fast-paced segments. Each segment should be 8-15 seconds. Total duration 45-60 seconds.`, topic, tone, language,
+Generate 4-6 segments. Each segment should be 8-15 seconds. Total duration 45-60 seconds.`, topic, tone, language,
+		secondsPerVisual, secondsPerVisual,
 		totalVisuals, clipCount, imageCount)
 
 	return callGroqForScript(systemPrompt, userPrompt)
+}
+
+// enforceVisualPacing trims each segment's sub_visuals so the user's
+// "seconds per visual" choice is respected even when the LLM ignores the
+// pacing instruction. For each segment, the maximum number of sub_visuals
+// allowed is ceil(segDuration / secondsPerVisual), tweaked per segment type
+// (hook/CTA get fewer, body uses the raw rule). When the LLM produced more
+// than the cap, we keep an evenly-spaced subset to preserve narrative
+// coverage rather than just slicing off the tail.
+func enforceVisualPacing(script *models.ScriptDocument, secondsPerVisual int) {
+	if script == nil || secondsPerVisual <= 0 {
+		return
+	}
+	for i, seg := range script.Segments {
+		if len(seg.SubVisuals) == 0 {
+			continue
+		}
+		segDur := seg.DurationSec
+		if segDur <= 0 {
+			segDur = 30 // sensible fallback
+		}
+
+		// Per-segment-type pacing tweak: hooks and CTAs deserve breathing room.
+		segPace := secondsPerVisual
+		switch seg.Type {
+		case "hook", "cta":
+			segPace = secondsPerVisual * 3 / 2 // ~50% slower
+		}
+		if segPace < 1 {
+			segPace = 1
+		}
+
+		maxAllowed := segDur / segPace
+		if segDur%segPace != 0 {
+			maxAllowed++
+		}
+		if maxAllowed < 1 {
+			maxAllowed = 1
+		}
+		// Hard ceiling for hook/CTA: at most 2 visuals each.
+		if (seg.Type == "hook" || seg.Type == "cta") && maxAllowed > 2 {
+			maxAllowed = 2
+		}
+
+		if len(seg.SubVisuals) <= maxAllowed {
+			continue
+		}
+
+		// Pick maxAllowed items at evenly-spaced indices so we cover beginning,
+		// middle, and end of the segment narrative.
+		original := seg.SubVisuals
+		kept := make([]models.SubVisual, 0, maxAllowed)
+		n := len(original)
+		for k := 0; k < maxAllowed; k++ {
+			idx := k * n / maxAllowed
+			if idx >= n {
+				idx = n - 1
+			}
+			sv := original[idx]
+			sv.Index = k
+			kept = append(kept, sv)
+		}
+		script.Segments[i].SubVisuals = kept
+	}
 }
 
 func callGroqForScript(systemPrompt, userPrompt string) (*models.ScriptDocument, error) {

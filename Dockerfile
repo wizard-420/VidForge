@@ -21,9 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Whisper for caption generation
+# Install Whisper for caption generation.
+# We install CPU-only torch first so pip doesn't pull ~5GB of NVIDIA CUDA
+# wheels (cufft, cusolver, cusparse, nvjitlink, ...). The slim runtime image
+# has no GPU access, so CPU-only is the correct (and far smaller) choice.
 RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir openai-whisper
+    pip install --no-cache-dir \
+        --timeout 120 --retries 10 \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch && \
+    pip install --no-cache-dir \
+        --timeout 120 --retries 10 \
+        openai-whisper
 
 WORKDIR /app
 

@@ -26,8 +26,16 @@ func NewOrchestrator(job *models.JobContext, onProgress ProgressFunc) *Orchestra
 	}
 }
 
-// Run executes the full pipeline from Stage 1 through Stage 7
+// Run executes the full pipeline from Stage 1 through Stage 7.
 func (o *Orchestrator) Run() {
+	o.runFrom(1)
+}
+
+// runFrom is the actual stage runner. When startStage > 1, earlier stages
+// are skipped — used by RunFrom() to resume after a pause (visual review or
+// upload approval) without re-running expensive stages whose outputs are
+// already in the JobContext.
+func (o *Orchestrator) runFrom(startStage int) {
 	o.job.SetStatus(models.StatusRunning)
 	_ = storage.UpdateJobStatus(o.job.JobID, models.StatusRunning)
 
@@ -46,6 +54,12 @@ func (o *Orchestrator) Run() {
 	}
 
 	for _, stage := range stages {
+		// Skip stages that already ran in a previous invocation.
+		// Resumed jobs (post-review or post-approval) start at startStage > 1.
+		if stage.num < startStage {
+			continue
+		}
+
 		o.job.SetStage(stage.num)
 
 		// Send "starting" progress event
@@ -81,6 +95,26 @@ func (o *Orchestrator) Run() {
 		o.sendProgress(stage.num, stage.name, 100, fmt.Sprintf("%s completed in %s", stage.name, elapsed.Round(time.Second)), "")
 
 		log.Printf("✅ Job %s — Stage %d completed in %s", o.job.JobID[:8], stage.num, elapsed.Round(time.Millisecond))
+
+		// Pause after Stage 4 for per-clip visual review unless the user
+		// opted out OR they've already approved on a prior pass. The
+		// review screen lets them regenerate any clip they don't like and
+		// optionally add Instagram-stories-style text overlays before the
+		// video is rendered. Manual mode (where the user supplied their
+		// own MP4s) is excluded — they already chose those clips.
+		if stage.num == 4 &&
+			!o.job.Payload.SkipVisualReview &&
+			!o.job.VisualsApproved &&
+			o.job.Payload.VideoMode != "manual" {
+			o.job.SetStatus(models.StatusPendingVisualReview)
+			_ = storage.UpdateJobStatus(o.job.JobID, models.StatusPendingVisualReview)
+			o.sendProgress(stage.num, stage.name, 100,
+				"Visuals fetched! Review and approve clips before rendering.",
+				"pending_visual_review")
+			log.Printf("⏸ Job %s — paused for visual review (%d clips)",
+				o.job.JobID[:8], len(o.job.ClipReview))
+			return
+		}
 	}
 
 	// All stages complete
@@ -111,11 +145,16 @@ func (o *Orchestrator) Run() {
 	log.Printf("🎉 Job %s — Pipeline completed successfully!", o.job.JobID[:8])
 }
 
-// RunFrom resumes a failed job from a specific stage
+// RunFrom resumes a job from a specific stage. Used by the retry endpoint
+// and by the post-review / post-approval resume flows. Stages numbered
+// below startStage are skipped, so the JobContext must already contain the
+// intermediate outputs (script, voice files, clip files, music, render).
 func (o *Orchestrator) RunFrom(startStage int) {
-	// For retry logic — will be implemented in Phase 3
-	log.Printf("🔄 Retrying job %s from stage %d", o.job.JobID[:8], startStage)
-	o.Run() // For now, re-run everything
+	if startStage < 1 {
+		startStage = 1
+	}
+	log.Printf("🔄 Resuming job %s from stage %d", o.job.JobID[:8], startStage)
+	o.runFrom(startStage)
 }
 
 func (o *Orchestrator) sendProgress(stage int, name string, pct int, msg, status string) {
